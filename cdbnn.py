@@ -193,6 +193,45 @@ class GlobalConfig:
     no_augmentation: bool = False              # Disable augmentation
     augmentation_strength: float = 0.5         # Strength of augmentations
 
+    # ========================================================================
+    # NEW: VAE (Variational Autoencoder) Flags - Optional Upgrade
+    # ========================================================================
+    use_vae: bool = False                      # Enable VAE mode
+    vae_beta: float = 1.0                      # KL divergence weight (β-VAE)
+    use_kl_annealing: bool = True              # Gradually increase KL weight
+    kl_annealing_epochs: int = 20              # Epochs to anneal KL weight
+    vae_temperature: float = 1.0               # Temperature for sampling
+    num_vae_samples: int = 10                  # Number of samples for uncertainty
+    use_beta_tc: bool = False                  # Use Beta-TCVAE (better disentanglement)
+    beta_tc_weight: float = 1.0                # Beta-TC weight
+
+    # ========================================================================
+    # NEW: Supervised Contrastive Learning Flags
+    # ========================================================================
+    use_contrastive_learning: bool = False     # Enable contrastive learning
+    contrastive_temperature: float = 0.07      # Temperature for contrastive loss
+    arcface_margin: float = 0.5                # Margin for ArcFace loss
+    contrastive_projection_dim: int = 128      # Projection dimension for contrastive head
+    contrastive_weight: float = 0.7            # Weight for contrastive loss
+
+    # ========================================================================
+    # NEW: Invertible Autoencoder Flags
+    # ========================================================================
+    use_invertible: bool = False               # Use invertible autoencoder
+    invertible_blocks: int = 4                 # Number of invertible blocks
+    reconstruction_weight: float = 1.0         # Weight for reconstruction loss
+    attribution_weight: float = 0.1            # Weight for attribution consistency loss
+    invertibility_weight: float = 0.5          # Weight for invertibility loss
+    contrastive_attribution_weight: float = 0.3  # Weight for contrastive attribution loss
+
+    # ========================================================================
+    # NEW: Resume Training Flags
+    # ========================================================================
+    resume: bool = False                       # Resume training from checkpoint
+    resume_from: Optional[str] = None          # Path to checkpoint file
+    reset_optimizer: bool = False              # Reset optimizer state
+    additional_epochs: Optional[int] = None    # Additional epochs to add
+
     def __post_init__(self):
         """Post-initialization setup"""
         pass
@@ -207,7 +246,10 @@ class GlobalConfig:
 
     @classmethod
     def from_dict(cls, data: Dict) -> 'GlobalConfig':
-        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
+        # Filter out keys that aren't in the dataclass fields
+        valid_fields = {f.name for f in cls.__dataclass_fields__.values()}
+        filtered_data = {k: v for k, v in data.items() if k in valid_fields}
+        return cls(**filtered_data)
 
 # =============================================================================
 # DOMAIN CONFIGURATIONS
@@ -4564,76 +4606,73 @@ class ContrastiveAutoencoderWithProjection(BaseAutoencoder):
 class ResNetContrastiveAutoencoder(BaseAutoencoder):
     """
     Production-ready Supervised Contrastive Learning with ResNet backbone
-    Achieves 75-85% accuracy on CIFAR-100
-    FIXED: Proper dimension handling for prediction
+    FIXED: Proper loss computation, regularization, and training stability
     """
 
     def __init__(self, config: GlobalConfig):
-        # Call parent init first to set up basic structure
+        # Call parent init first
         super().__init__(config)
 
         num_classes = config.num_classes or 100
         self.compressed_dims = config.compressed_dims
+        self.num_classes = num_classes
 
         # ================================================================
-        # RESNET BACKBONE (pretrained on ImageNet)
+        # RESNET BACKBONE - FIXED: Proper CIFAR ResNet
         # ================================================================
-        # Use ResNet18 as feature extractor
-        if config.input_size[0] <= 32:
-            # For small images (CIFAR), use modified ResNet
-            self.encoder_backbone = self._create_cifar_resnet()
-            # Get feature dimension from backbone
+        if config.input_size[0] <= 64:
+            # For small images (CIFAR), use modified ResNet with proper dropout
+            self.encoder_backbone = self._create_cifar_resnet(dropout=0.2)
+            # Get feature dimension
             with torch.no_grad():
                 dummy = torch.zeros(1, config.in_channels, config.input_size[0], config.input_size[1])
                 feat_dim = self.encoder_backbone(dummy).view(1, -1).shape[1]
         else:
             # For larger images, use standard ResNet
             self.encoder_backbone = models.resnet18(weights='IMAGENET1K_V1')
-            # Remove the final classification layer
             self.encoder_backbone = nn.Sequential(*list(self.encoder_backbone.children())[:-1])
-            # Get feature dimension from backbone
             with torch.no_grad():
                 dummy = torch.zeros(1, config.in_channels, config.input_size[0], config.input_size[1])
                 feat_dim = self.encoder_backbone(dummy).view(1, -1).shape[1]
 
         # ================================================================
-        # PROJECTION HEAD (for contrastive learning)
-        # FIXED: Ensure dimensions are compatible
+        # PROJECTION HEAD - FIXED: Proper dimensions with LayerNorm
         # ================================================================
-        # Calculate appropriate intermediate dimensions
         proj_hidden = min(512, max(128, feat_dim // 2))
 
         self.projection_head = nn.Sequential(
             nn.Linear(feat_dim, proj_hidden),
-            nn.BatchNorm1d(proj_hidden),
+            nn.LayerNorm(proj_hidden),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.3),
+            nn.Linear(proj_hidden, proj_hidden // 2),
+            nn.LayerNorm(proj_hidden // 2),
             nn.ReLU(inplace=True),
             nn.Dropout(0.2),
-            nn.Linear(proj_hidden, self.compressed_dims)
+            nn.Linear(proj_hidden // 2, self.compressed_dims)
         )
 
         # ================================================================
-        # CLASSIFIER HEAD (for final classification)
-        # FIXED: Use compressed_dims as input dimension
+        # CLASSIFIER HEAD - FIXED: Proper regularization
         # ================================================================
-        classifier_hidden = min(512, max(128, self.compressed_dims * 4))
+        classifier_hidden = min(512, max(256, self.compressed_dims * 4))
 
         self.classifier = nn.Sequential(
             nn.Linear(self.compressed_dims, classifier_hidden),
-            nn.BatchNorm1d(classifier_hidden),
+            nn.LayerNorm(classifier_hidden),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.4),
+            nn.Linear(classifier_hidden, classifier_hidden // 2),
+            nn.LayerNorm(classifier_hidden // 2),
             nn.ReLU(inplace=True),
             nn.Dropout(0.3),
-            nn.Linear(classifier_hidden, classifier_hidden // 2),
-            nn.BatchNorm1d(classifier_hidden // 2),
-            nn.ReLU(inplace=True),
-            nn.Dropout(0.2),
             nn.Linear(classifier_hidden // 2, num_classes)
         )
 
         # ================================================================
-        # DECODER (for reconstruction - optional)
+        # DECODER - Optional, keep simple
         # ================================================================
-        # Simple decoder to maintain compatibility
-        decoder_hidden = max(256, self.compressed_dims * 8)
+        decoder_hidden = max(128, self.compressed_dims * 4)
         self.decoder = nn.Sequential(
             nn.Linear(self.compressed_dims, decoder_hidden),
             nn.ReLU(inplace=True),
@@ -4649,9 +4688,16 @@ class ResNetContrastiveAutoencoder(BaseAutoencoder):
         self.in_channels = config.in_channels
 
         # ================================================================
-        # CONTRASTIVE LEARNING PARAMETERS
+        # CONTRASTIVE LEARNING PARAMETERS - FIXED: Learnable temperature
         # ================================================================
-        self.temperature = nn.Parameter(torch.tensor(0.07))
+        self.temperature = nn.Parameter(torch.tensor(0.07, requires_grad=True))
+
+        # ================================================================
+        # LOSS WEIGHTS - FIXED: Proper balancing
+        # ================================================================
+        self.recon_weight = 0.1
+        self.contrastive_weight = 1.0
+        self.classification_weight = 1.0
 
         logger.info(f"ResNetContrastiveAutoencoder initialized:")
         logger.info(f"  Backbone feature dimension: {feat_dim}")
@@ -4659,17 +4705,23 @@ class ResNetContrastiveAutoencoder(BaseAutoencoder):
         logger.info(f"  Projection dimension: {self.compressed_dims}")
         logger.info(f"  Classifier hidden dimension: {classifier_hidden}")
         logger.info(f"  Number of classes: {num_classes}")
+        logger.info(f"  Loss weights - Recon: {self.recon_weight}, Contrastive: {self.contrastive_weight}, Class: {self.classification_weight}")
 
-    def _create_cifar_resnet(self):
-        """Create ResNet adapted for CIFAR images (32x32)"""
-        # Use a smaller ResNet for CIFAR
+    def _create_cifar_resnet(self, dropout=0.2):
+        """Create ResNet adapted for CIFAR images with proper regularization"""
+
         class BasicBlock(nn.Module):
-            def __init__(self, in_planes, planes, stride=1):
+            expansion = 1
+
+            def __init__(self, in_planes, planes, stride=1, dropout=0.0):
                 super().__init__()
                 self.conv1 = nn.Conv2d(in_planes, planes, kernel_size=3, stride=stride, padding=1, bias=False)
                 self.bn1 = nn.BatchNorm2d(planes)
                 self.conv2 = nn.Conv2d(planes, planes, kernel_size=3, stride=1, padding=1, bias=False)
                 self.bn2 = nn.BatchNorm2d(planes)
+                self.dropout = nn.Dropout2d(dropout) if dropout > 0 else nn.Identity()
+                self.stride = stride
+
                 self.shortcut = nn.Sequential()
                 if stride != 1 or in_planes != planes:
                     self.shortcut = nn.Sequential(
@@ -4679,29 +4731,32 @@ class ResNetContrastiveAutoencoder(BaseAutoencoder):
 
             def forward(self, x):
                 out = F.relu(self.bn1(self.conv1(x)))
+                out = self.dropout(out)
                 out = self.bn2(self.conv2(out))
                 out += self.shortcut(x)
                 out = F.relu(out)
                 return out
 
         class ResNetCIFAR(nn.Module):
-            def __init__(self, block, num_blocks, in_channels=3):
+            def __init__(self, block, num_blocks, in_channels=3, num_classes=10, dropout=0.0):
                 super().__init__()
                 self.in_planes = 64
+                self.in_channels = in_channels
+
                 self.conv1 = nn.Conv2d(in_channels, 64, kernel_size=3, stride=1, padding=1, bias=False)
                 self.bn1 = nn.BatchNorm2d(64)
-                self.layer1 = self._make_layer(block, 64, num_blocks[0], stride=1)
-                self.layer2 = self._make_layer(block, 128, num_blocks[1], stride=2)
-                self.layer3 = self._make_layer(block, 256, num_blocks[2], stride=2)
-                self.layer4 = self._make_layer(block, 512, num_blocks[3], stride=2)
+                self.layer1 = self._make_layer(block, 64, num_blocks[0], stride=1, dropout=dropout)
+                self.layer2 = self._make_layer(block, 128, num_blocks[1], stride=2, dropout=dropout)
+                self.layer3 = self._make_layer(block, 256, num_blocks[2], stride=2, dropout=dropout)
+                self.layer4 = self._make_layer(block, 512, num_blocks[3], stride=2, dropout=dropout)
                 self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
 
-            def _make_layer(self, block, planes, num_blocks, stride):
+            def _make_layer(self, block, planes, num_blocks, stride, dropout):
                 strides = [stride] + [1] * (num_blocks - 1)
                 layers = []
                 for stride in strides:
-                    layers.append(block(self.in_planes, planes, stride))
-                    self.in_planes = planes
+                    layers.append(block(self.in_planes, planes, stride, dropout))
+                    self.in_planes = planes * block.expansion
                 return nn.Sequential(*layers)
 
             def forward(self, x):
@@ -4714,22 +4769,22 @@ class ResNetContrastiveAutoencoder(BaseAutoencoder):
                 out = out.view(out.size(0), -1)
                 return out
 
-        return ResNetCIFAR(BasicBlock, [2, 2, 2, 2], self.in_channels)
+        return ResNetCIFAR(BasicBlock, [2, 2, 2, 2],
+                          in_channels=self.in_channels,
+                          num_classes=self.num_classes,
+                          dropout=dropout)
 
     def encode(self, x: torch.Tensor) -> torch.Tensor:
         """Encode image to compressed representation"""
-        # Get features from backbone
         features = self.encoder_backbone(x)
 
         # Ensure features are 2D [batch, dim]
         if features.dim() == 4:
-            # If still 4D, apply global pooling
             features = F.adaptive_avg_pool2d(features, (1, 1))
             features = features.view(features.size(0), -1)
         elif features.dim() == 3:
             features = features.mean(dim=1)
 
-        # Apply projection head
         compressed = self.projection_head(features)
         return compressed
 
@@ -4781,10 +4836,14 @@ class ResNetContrastiveAutoencoder(BaseAutoencoder):
     def supervised_contrastive_loss(self, features: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
         """
         Supervised Contrastive Loss (SupCon)
-        Based on: "Supervised Contrastive Learning" (Khosla et al., NeurIPS 2020)
+        FIXED: Handles edge cases and numerical stability
         """
         batch_size = features.shape[0]
         device = features.device
+
+        # If batch size is 1, contrastive loss is undefined
+        if batch_size < 2:
+            return torch.tensor(0.0, device=device)
 
         # Normalize features
         features = F.normalize(features, p=2, dim=1)
@@ -4798,6 +4857,10 @@ class ResNetContrastiveAutoencoder(BaseAutoencoder):
 
         # Remove self-similarity
         mask.fill_diagonal_(0)
+
+        # If no positive pairs, return zero loss
+        if mask.sum() == 0:
+            return torch.tensor(0.0, device=device)
 
         # Compute logits
         exp_sim = torch.exp(similarity)
@@ -4822,46 +4885,92 @@ class ResNetContrastiveAutoencoder(BaseAutoencoder):
 
     def compute_loss(self, outputs: Dict, inputs: torch.Tensor, labels: torch.Tensor,
                      phase: int, epoch: int) -> Tuple[torch.Tensor, float]:
-        """Compute combined loss"""
-        # Reconstruction loss
+        """
+        Compute combined loss - FIXED: Proper weighting and scaling
+        """
+        # ================================================================
+        # 1. RECONSTRUCTION LOSS (should be small weight)
+        # ================================================================
         recon_loss = F.mse_loss(outputs['reconstruction'], inputs)
+        recon_loss = torch.clamp(recon_loss, min=0, max=10.0)
 
-        # Classification loss
-        ce_loss = F.cross_entropy(outputs['class_logits'], labels)
+        # ================================================================
+        # 2. CLASSIFICATION LOSS (with label smoothing for 100 classes)
+        # ================================================================
+        n_classes = self.num_classes
+        logits = outputs['class_logits']
+        logits = torch.clamp(logits, min=-50, max=50)
 
+        # Label smoothing for CIFAR-100
         if phase == 2:
-            # Supervised contrastive loss
-            if 'contrastive_features' in outputs:
-                supcon_loss = self.supervised_contrastive_loss(
-                    outputs['contrastive_features'],
-                    outputs['contrastive_labels']
-                )
-            else:
-                supcon_loss = torch.tensor(0.0, device=inputs.device)
-
-            # Dynamic weighting
-            if epoch < 50:
-                # Early training: focus on contrastive learning
-                total_loss = 0.3 * recon_loss + 0.5 * supcon_loss + 0.2 * ce_loss
-            else:
-                # Later training: focus on classification
-                total_loss = 0.1 * recon_loss + 0.2 * supcon_loss + 0.7 * ce_loss
+            smoothing = 0.1
+            smooth_labels = torch.full_like(logits, smoothing / n_classes)
+            smooth_labels.scatter_(1, labels.unsqueeze(1), 1 - smoothing + smoothing / n_classes)
+            class_loss = -(smooth_labels * F.log_softmax(logits, dim=1)).sum(dim=1).mean()
         else:
+            class_loss = F.cross_entropy(logits, labels)
+
+        class_loss = torch.clamp(class_loss, min=0, max=10.0)
+
+        # ================================================================
+        # 3. CONTRASTIVE LOSS (only in phase 2)
+        # ================================================================
+        contrastive_loss = torch.tensor(0.0, device=inputs.device)
+        if phase == 2 and 'contrastive_features' in outputs:
+            contrastive_loss = self.supervised_contrastive_loss(
+                outputs['contrastive_features'],
+                outputs['contrastive_labels']
+            )
+            contrastive_loss = torch.clamp(contrastive_loss, min=0, max=10.0)
+
+        # ================================================================
+        # 4. COMBINE WITH DYNAMIC WEIGHTING
+        # ================================================================
+        if phase == 2:
+            # Dynamic weighting based on training progress
+            progress = min(1.0, epoch / 200.0)
+
+            # Early: focus on contrastive learning
+            # Late: focus on classification
+            contrastive_weight = max(0.3, 1.0 - progress * 0.7)
+            class_weight = max(0.3, progress * 0.7)
+            recon_weight = 0.05  # Always small
+
+            total_loss = (
+                recon_weight * recon_loss +
+                contrastive_weight * contrastive_loss +
+                class_weight * class_loss
+            )
+        else:
+            # Phase 1: Only reconstruction
             total_loss = recon_loss
 
+        # ================================================================
+        # 5. ADD GRADIENT PENALTY FOR STABILITY (optional)
+        # ================================================================
+        if phase == 2 and epoch > 10:
+            # Penalize extreme logits
+            logit_penalty = torch.mean(torch.relu(torch.abs(logits) - 10.0)) * 0.001
+            total_loss = total_loss + logit_penalty
+
+        # Clamp final loss
+        total_loss = torch.clamp(total_loss, max=100.0)
+
+        # Check for NaN
+        if torch.isnan(total_loss) or torch.isinf(total_loss):
+            logger.warning(f"NaN/Inf in loss - returning zero")
+            return torch.tensor(0.0, device=inputs.device, requires_grad=True), 0.0
+
+        # Calculate accuracy
         accuracy = (outputs['class_predictions'] == labels).float().mean().item()
 
         return total_loss, accuracy
 
     def _fix_tensor_dim(self, tensor: torch.Tensor, target_batch_size: int, duplicated: bool) -> torch.Tensor:
-        """
-        Fix tensor dimensions after possible duplication.
-        This method is inherited from BaseAutoencoder but we override it for clarity.
-        """
+        """Fix tensor dimensions after possible duplication."""
         if duplicated and tensor.size(0) > target_batch_size:
             tensor = tensor[:target_batch_size]
 
-        # Handle 1D tensors (like predictions)
         if tensor.dim() == 1 and target_batch_size == 1:
             tensor = tensor.unsqueeze(0)
 
@@ -4924,6 +5033,904 @@ class SupervisedContrastiveLoss(nn.Module):
 
         return loss
 
+# =============================================================================
+# BAYESIAN VAE (VARIATIONAL AUTOENCODER) - OPTIONAL UPGRADE
+# =============================================================================
+
+class BayesianVAE(BaseAutoencoder):
+    """
+    Variational Autoencoder with Bayesian inference.
+    Replaces standard autoencoder with probabilistic latent space.
+    COMPLETELY OPTIONAL - falls back to BaseAutoencoder when use_vae=False
+    """
+
+    def __init__(self, config: GlobalConfig):
+        # Call parent init first
+        super().__init__(config)
+
+        # ================================================================
+        # VAE PARAMETERS
+        # ================================================================
+        self.latent_dim = self.compressed_dims
+        self.beta = getattr(config, 'vae_beta', 1.0)
+        self.use_kl_annealing = getattr(config, 'use_kl_annealing', True)
+        self.kl_annealing_epochs = getattr(config, 'kl_annealing_epochs', 20)
+        self.temperature = getattr(config, 'vae_temperature', 1.0)
+        self.use_beta_tc = getattr(config, 'use_beta_tc', False)
+        self.beta_tc_weight = getattr(config, 'beta_tc_weight', 1.0)
+
+        # Current KL weight (updated during training)
+        self.current_kl_weight = 0.0 if self.use_kl_annealing else self.beta
+
+        # ================================================================
+        # VAE ENCODER HEAD (Mean and Log Variance)
+        # ================================================================
+        # After flattening and embedding, we predict mean and log_var
+        vae_hidden = max(64, self.feature_dims // 2)
+
+        self.vae_encoder = nn.Sequential(
+            nn.Linear(self.flattened_size, self.feature_dims),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.2),
+            nn.Linear(self.feature_dims, vae_hidden),
+            nn.ReLU(inplace=True),
+        )
+
+        # Mean and log variance for Gaussian distribution
+        self.mean_layer = nn.Linear(vae_hidden, self.latent_dim)
+        self.logvar_layer = nn.Linear(vae_hidden, self.latent_dim)
+
+        # ================================================================
+        # VAE DECODER (Reconstructs from sampled latent)
+        # ================================================================
+        decoder_hidden = max(256, self.latent_dim * 4)
+
+        self.vae_decoder = nn.Sequential(
+            nn.Linear(self.latent_dim, decoder_hidden),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.2),
+            nn.Linear(decoder_hidden, decoder_hidden * 2),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.2),
+            nn.Linear(decoder_hidden * 2, decoder_hidden * 4),
+            nn.ReLU(inplace=True),
+            nn.Linear(decoder_hidden * 4, self.flattened_size),
+            nn.Sigmoid()
+        )
+
+        # ================================================================
+        # CLASSIFIER (Uses sampled latent)
+        # ================================================================
+        classifier_hidden = min(512, max(128, self.latent_dim * 4))
+
+        self.classifier = nn.Sequential(
+            nn.Linear(self.latent_dim, classifier_hidden),
+            nn.BatchNorm1d(classifier_hidden),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.3),
+            nn.Linear(classifier_hidden, classifier_hidden // 2),
+            nn.BatchNorm1d(classifier_hidden // 2),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.2),
+            nn.Linear(classifier_hidden // 2, config.num_classes or 2)
+        )
+
+        # ================================================================
+        # CONTRASTIVE PROJECTION HEAD (Optional, if contrastive enabled)
+        # ================================================================
+        if getattr(config, 'use_contrastive_learning', False):
+            self.contrastive_head = nn.Sequential(
+                nn.Linear(self.latent_dim, 256),
+                nn.ReLU(inplace=True),
+                nn.Dropout(0.2),
+                nn.Linear(256, 128)
+            )
+
+        # ================================================================
+        # KL ANNEALING SCHEDULER
+        # ================================================================
+        self.kl_scheduler = self._create_kl_scheduler()
+
+        logger.info(f"Bayesian VAE initialized:")
+        logger.info(f"  Latent dimension: {self.latent_dim}")
+        logger.info(f"  Beta (KL weight): {self.beta}")
+        logger.info(f"  KL annealing: {self.use_kl_annealing}")
+        logger.info(f"  Beta-TC: {self.use_beta_tc}")
+        logger.info(f"  Temperature: {self.temperature}")
+
+    def _create_kl_scheduler(self):
+        """Create KL annealing scheduler"""
+        if not self.use_kl_annealing:
+            return None
+
+        class KLScheduler:
+            def __init__(self, total_epochs, start_weight=0.0, end_weight=1.0, strategy='cosine'):
+                self.total_epochs = total_epochs
+                self.start_weight = start_weight
+                self.end_weight = end_weight
+                self.strategy = strategy
+                self.current_weight = start_weight
+                self.epoch = 0
+
+            def step(self, epoch):
+                self.epoch = epoch
+                progress = min(1.0, epoch / max(1, self.total_epochs))
+
+                if self.strategy == 'linear':
+                    weight = self.start_weight + (self.end_weight - self.start_weight) * progress
+                elif self.strategy == 'cosine':
+                    weight = self.start_weight + (self.end_weight - self.start_weight) * (
+                        1 - np.cos(progress * np.pi)) / 2
+                elif self.strategy == 'sigmoid':
+                    weight = self.start_weight + (self.end_weight - self.start_weight) * (
+                        1 / (1 + np.exp(-10 * (progress - 0.5))))
+                elif self.strategy == 'step':
+                    weight = self.start_weight if progress < 0.5 else self.end_weight
+                else:
+                    weight = self.start_weight + (self.end_weight - self.start_weight) * progress
+
+                self.current_weight = weight
+                return weight
+
+        return KLScheduler(
+            total_epochs=self.kl_annealing_epochs,
+            start_weight=0.0,
+            end_weight=self.beta,
+            strategy='cosine'
+        )
+
+    def encode(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Encode input to latent distribution parameters.
+        Returns: mean, log_var, sampled_z
+        """
+        # Apply encoder layers (from parent)
+        for layer in self.encoder_layers:
+            x = layer(x)
+
+        # Flatten
+        x = x.view(x.size(0), -1)
+
+        # VAE encoder head
+        x = self.vae_encoder(x)
+
+        # Mean and log variance
+        mean = self.mean_layer(x)
+        log_var = self.logvar_layer(x)
+
+        # Clamp log_var for numerical stability
+        log_var = torch.clamp(log_var, min=-10, max=10)
+
+        # Reparameterization trick
+        if self.training:
+            std = torch.exp(0.5 * log_var)
+            eps = torch.randn_like(std)
+            z = mean + eps * std
+        else:
+            # During inference, use mean (with optional temperature scaling)
+            z = mean * self.temperature
+
+        return mean, log_var, z
+
+    def decode(self, z: torch.Tensor) -> torch.Tensor:
+        """Decode from latent space to image"""
+        x = self.vae_decoder(z)
+
+        # Reshape to image dimensions
+        x = x.view(x.size(0), self.encoder_channels[-1],
+                   self.final_h, self.final_w)
+
+        # Run through decoder layers (from parent)
+        for layer in self.decoder_layers:
+            x = layer(x)
+
+        # Ensure correct spatial dimensions
+        target_h, target_w = self.config.input_size
+        if x.shape[-2] != target_h or x.shape[-1] != target_w:
+            x = F.interpolate(x, size=(target_h, target_w),
+                            mode='bilinear', align_corners=False)
+
+        return x
+
+    def reparameterize(self, mean: torch.Tensor, log_var: torch.Tensor) -> torch.Tensor:
+        """Reparameterization trick: sample from N(mean, exp(log_var))"""
+        if self.training:
+            std = torch.exp(0.5 * log_var)
+            eps = torch.randn_like(std)
+            return mean + eps * std
+        else:
+            return mean * self.temperature
+
+    def forward(self, x: torch.Tensor, labels: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
+        """Forward pass with VAE sampling"""
+        original_batch_size = x.size(0)
+        duplicated = False
+
+        # Apply normalization
+        x = self.normalize_batch(x)
+
+        # Handle single sample
+        if self.training and original_batch_size == 1:
+            x = torch.cat([x, x], dim=0)
+            duplicated = True
+            if labels is not None:
+                labels = torch.cat([labels, labels], dim=0)
+
+        # Encode to latent distribution
+        mean, log_var, z = self.encode(x)
+
+        # Decode from sampled latent
+        reconstruction = self.decode(z)
+
+        # Classification from latent
+        logits = self.classifier(z)
+
+        # Contrastive features (if enabled)
+        contrastive_features = None
+        if hasattr(self, 'contrastive_head'):
+            contrastive_features = self.contrastive_head(z)
+
+        # Build output dictionary
+        output = {
+            'mean': self._fix_tensor_dim(mean, original_batch_size, duplicated),
+            'log_var': self._fix_tensor_dim(log_var, original_batch_size, duplicated),
+            'z': self._fix_tensor_dim(z, original_batch_size, duplicated),
+            'compressed_embedding': self._fix_tensor_dim(z, original_batch_size, duplicated),
+            'reconstruction': self._fix_tensor_dim(reconstruction, original_batch_size, duplicated),
+            'class_logits': self._fix_tensor_dim(logits, original_batch_size, duplicated),
+            'class_predictions': self._fix_tensor_dim(logits.argmax(dim=1), original_batch_size, duplicated),
+            'class_probabilities': self._fix_tensor_dim(F.softmax(logits, dim=1), original_batch_size, duplicated),
+            'kl_weight': torch.tensor(self.current_kl_weight, device=x.device)
+        }
+
+        if contrastive_features is not None:
+            output['contrastive_features'] = self._fix_tensor_dim(
+                contrastive_features, original_batch_size, duplicated
+            )
+
+        return output
+
+    def compute_vae_loss(self, mean: torch.Tensor, log_var: torch.Tensor,
+                         reconstruction: torch.Tensor, target: torch.Tensor) -> Tuple[torch.Tensor, ...]:
+        """
+        Compute VAE loss (reconstruction + KL divergence).
+        Supports Beta-VAE and Beta-TCVAE.
+        """
+        # Reconstruction loss (MSE)
+        recon_loss = F.mse_loss(reconstruction, target)
+
+        # KL divergence
+        kl_loss = -0.5 * torch.sum(1 + log_var - mean.pow(2) - log_var.exp(), dim=1)
+        kl_loss = kl_loss.mean()
+
+        # Beta-TCVAE: Total Correlation loss
+        tc_loss = torch.tensor(0.0, device=mean.device)
+        if self.use_beta_tc:
+            tc_loss = self._compute_tc_loss(mean, log_var)
+
+        # Apply KL weight (with annealing if enabled)
+        kl_weight = self.current_kl_weight if self.use_kl_annealing else self.beta
+
+        # Total VAE loss
+        vae_loss = recon_loss + kl_weight * kl_loss + self.beta_tc_weight * tc_loss
+
+        return vae_loss, recon_loss, kl_loss, tc_loss
+
+    def _compute_tc_loss(self, mean: torch.Tensor, log_var: torch.Tensor) -> torch.Tensor:
+        """Compute Total Correlation loss for Beta-TCVAE"""
+        batch_size = mean.shape[0]
+        device = mean.device
+
+        # Sample from posterior
+        z = mean + torch.exp(0.5 * log_var) * torch.randn_like(log_var)
+
+        # Compute log q(z) (empirical distribution)
+        # Use kernel density estimation
+        sigma = 0.1
+        distance = torch.cdist(z, z, p=2)
+        kernel = torch.exp(-distance**2 / (2 * sigma**2))
+        log_qz = torch.log(kernel.mean(dim=1) + 1e-8)
+
+        # Compute log prod q(z_i) (product of marginals)
+        n_dim = z.shape[1]
+        log_prod_qz = torch.zeros(batch_size, device=device)
+
+        for dim in range(n_dim):
+            z_dim = z[:, dim].view(-1, 1)
+            distance = torch.cdist(z_dim, z_dim, p=2)
+            kernel = torch.exp(-distance**2 / (2 * sigma**2))
+            log_qz_dim = torch.log(kernel.mean(dim=1) + 1e-8)
+            log_prod_qz += log_qz_dim
+
+        # TC loss
+        tc_loss = (log_qz - log_prod_qz).mean()
+
+        return tc_loss
+
+    def compute_loss(self, outputs: Dict, inputs: torch.Tensor, labels: torch.Tensor,
+                     phase: int, epoch: int) -> Tuple[torch.Tensor, float]:
+        """
+        Compute total loss with VAE + classification.
+        Called from training loop when use_vae=True.
+        """
+        # Update KL weight if annealing
+        if self.use_kl_annealing and self.kl_scheduler is not None:
+            self.current_kl_weight = self.kl_scheduler.step(epoch)
+
+        # ================================================================
+        # 1. VAE LOSS (Reconstruction + KL)
+        # ================================================================
+        vae_loss, recon_loss, kl_loss, tc_loss = self.compute_vae_loss(
+            outputs['mean'],
+            outputs['log_var'],
+            outputs['reconstruction'],
+            inputs
+        )
+
+        # ================================================================
+        # 2. CLASSIFICATION LOSS
+        # ================================================================
+        class_loss = F.cross_entropy(outputs['class_logits'], labels)
+
+        # ================================================================
+        # 3. CONTRASTIVE LOSS (Optional)
+        # ================================================================
+        contrastive_loss = torch.tensor(0.0, device=inputs.device)
+        if phase == 2 and 'contrastive_features' in outputs:
+            if hasattr(self, 'contrastive_loss_fn'):
+                contrastive_loss = self.contrastive_loss_fn(
+                    outputs['contrastive_features'],
+                    labels
+                )
+
+        # ================================================================
+        # 4. DYNAMIC WEIGHTING
+        # ================================================================
+        progress = min(1.0, epoch / self.config.epochs)
+
+        if phase == 1:
+            # Phase 1: Only VAE (unsupervised)
+            total_loss = vae_loss
+        else:
+            # Phase 2: VAE + Classification + Contrastive
+
+            # Dynamic weights
+            recon_weight = max(0.3, 0.7 * (1.0 - progress * 0.5))
+            class_weight = min(0.5, 0.1 + 0.4 * progress)
+            kl_weight = 0.2
+
+            # Normalize
+            total_w = recon_weight + class_weight + kl_weight
+            recon_weight = recon_weight / total_w
+            class_weight = class_weight / total_w
+            kl_weight = kl_weight / total_w
+
+            # Combine losses
+            total_loss = (
+                recon_weight * recon_loss +
+                class_weight * class_loss +
+                kl_weight * kl_loss
+            )
+
+            # Add contrastive loss with small weight
+            if contrastive_loss > 0:
+                contrastive_weight = 0.15
+                total_loss = total_loss + contrastive_weight * contrastive_loss
+
+            # Add TC loss if enabled
+            if self.use_beta_tc and tc_loss > 0:
+                tc_weight = 0.05
+                total_loss = total_loss + tc_weight * tc_loss
+
+        # ================================================================
+        # 5. CALCULATE ACCURACY
+        # ================================================================
+        accuracy = (outputs['class_predictions'] == labels).float().mean().item()
+
+        return total_loss, accuracy
+
+    def get_uncertainty(self, x: torch.Tensor, num_samples: int = 10) -> Dict[str, torch.Tensor]:
+        """
+        Get uncertainty estimates using Monte Carlo sampling.
+        """
+        self.eval()
+
+        all_logits = []
+        all_reconstructions = []
+        all_latents = []
+
+        with torch.no_grad():
+            for _ in range(num_samples):
+                outputs = self.forward(x)
+                all_logits.append(outputs['class_logits'])
+                all_reconstructions.append(outputs['reconstruction'])
+                all_latents.append(outputs['z'])
+
+        # Stack samples
+        logits = torch.stack(all_logits, dim=0)  # [num_samples, batch, classes]
+        reconstructions = torch.stack(all_reconstructions, dim=0)
+        latents = torch.stack(all_latents, dim=0)
+
+        # Compute statistics
+        mean_logits = logits.mean(dim=0)
+        std_logits = logits.std(dim=0)
+
+        # Classification
+        probs = F.softmax(mean_logits, dim=1)
+        preds = probs.argmax(dim=1)
+        confidence = probs.max(dim=1)[0]
+        uncertainty = std_logits.mean(dim=1)
+
+        return {
+            'predictions': preds,
+            'confidence': confidence,
+            'uncertainty': uncertainty,
+            'probabilities': probs,
+            'mean_logits': mean_logits,
+            'std_logits': std_logits,
+            'mean_reconstruction': reconstructions.mean(dim=0),
+            'std_reconstruction': reconstructions.std(dim=0),
+            'mean_latent': latents.mean(dim=0),
+            'std_latent': latents.std(dim=0)
+        }
+
+
+class BetaTCVAE(BayesianVAE):
+    """
+    Beta-TCVAE: Total Correlation VAE for better disentanglement.
+    Extends BayesianVAE with additional total correlation loss.
+    """
+
+    def __init__(self, config: GlobalConfig):
+        super().__init__(config)
+        self.beta_tc = getattr(config, 'beta_tc_weight', 1.0)
+
+        logger.info(f"Beta-TCVAE initialized with beta_tc={self.beta_tc}")
+
+    def compute_vae_loss(self, mean: torch.Tensor, log_var: torch.Tensor,
+                         reconstruction: torch.Tensor, target: torch.Tensor) -> Tuple[torch.Tensor, ...]:
+        """
+        Beta-TCVAE loss with total correlation term.
+        """
+        # Reconstruction loss
+        recon_loss = F.mse_loss(reconstruction, target)
+
+        # KL divergence
+        kl_loss = -0.5 * torch.sum(1 + log_var - mean.pow(2) - log_var.exp(), dim=1)
+        kl_loss = kl_loss.mean()
+
+        # Total Correlation (TC) - estimated from batch
+        tc_loss = self._compute_tc_loss(mean, log_var)
+
+        # Apply KL weight
+        kl_weight = self.current_kl_weight if self.use_kl_annealing else self.beta
+
+        # Total VAE loss
+        vae_loss = recon_loss + kl_weight * kl_loss + self.beta_tc * tc_loss
+
+        return vae_loss, recon_loss, kl_loss, tc_loss
+
+# =============================================================================
+# VAE WITH CONTRASTIVE - COMBINED MODEL
+# =============================================================================
+
+class VAEWithContrastive(BayesianVAE):
+    """
+    VAE with Supervised Contrastive Learning head.
+    Combines variational inference with contrastive representation learning.
+    """
+
+    def __init__(self, config: GlobalConfig):
+        super().__init__(config)
+
+        # ================================================================
+        # CONTRASTIVE PROJECTION HEAD (from checkpoint)
+        # ================================================================
+        self.contrastive_head = nn.Sequential(
+            nn.Linear(self.latent_dim, 256),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.2),
+            nn.Linear(256, 128)
+        )
+
+        # ================================================================
+        # CONTRASTIVE LOSS
+        # ================================================================
+        self.contrastive_loss_fn = SupervisedContrastiveLoss(
+            temperature=getattr(config, 'contrastive_temperature', 0.07)
+        )
+
+        # ================================================================
+        # CLASSIFIER (enhanced for combined model)
+        # ================================================================
+        num_classes = config.num_classes or 2
+
+        if num_classes >= 100:
+            self.classifier = nn.Sequential(
+                nn.Linear(self.latent_dim, 512),
+                nn.BatchNorm1d(512),
+                nn.ReLU(inplace=True),
+                nn.Dropout(0.3),
+                nn.Linear(512, 256),
+                nn.BatchNorm1d(256),
+                nn.ReLU(inplace=True),
+                nn.Dropout(0.3),
+                nn.Linear(256, num_classes)
+            )
+        elif num_classes >= 50:
+            self.classifier = nn.Sequential(
+                nn.Linear(self.latent_dim, 256),
+                nn.BatchNorm1d(256),
+                nn.ReLU(inplace=True),
+                nn.Dropout(0.3),
+                nn.Linear(256, num_classes)
+            )
+        else:
+            self.classifier = nn.Sequential(
+                nn.Linear(self.latent_dim, 128),
+                nn.ReLU(inplace=True),
+                nn.Dropout(0.2),
+                nn.Linear(128, num_classes)
+            )
+
+        # ================================================================
+        # LOSS WEIGHTS
+        # ================================================================
+        self.recon_weight = 0.1
+        self.kl_weight = 0.5
+        self.contrastive_weight = getattr(config, 'contrastive_weight', 0.7)
+        self.classification_weight = 1.0
+
+        logger.info("=" * 60)
+        logger.info("VAEWithContrastive initialized (combined model)")
+        logger.info(f"  Latent dimension: {self.latent_dim}")
+        logger.info(f"  Contrastive temperature: {getattr(config, 'contrastive_temperature', 0.07)}")
+        logger.info(f"  Contrastive weight: {self.contrastive_weight}")
+        logger.info("=" * 60)
+
+    def forward(self, x: torch.Tensor, labels: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
+        """Forward pass with both VAE and contrastive outputs"""
+        original_batch_size = x.size(0)
+        duplicated = False
+
+        # Apply normalization
+        x = self.normalize_batch(x)
+
+        # Handle single sample
+        if self.training and original_batch_size == 1:
+            x = torch.cat([x, x], dim=0)
+            duplicated = True
+            if labels is not None:
+                labels = torch.cat([labels, labels], dim=0)
+
+        # ================================================================
+        # VAE ENCODING
+        # ================================================================
+        # Apply encoder layers
+        for layer in self.encoder_layers:
+            x = layer(x)
+
+        # Flatten
+        x = x.view(x.size(0), -1)
+
+        # VAE encoder head
+        x = self.vae_encoder(x)
+        mean = self.mean_layer(x)
+        log_var = self.logvar_layer(x)
+        log_var = torch.clamp(log_var, min=-10, max=10)
+
+        # Reparameterization
+        if self.training:
+            std = torch.exp(0.5 * log_var)
+            eps = torch.randn_like(std)
+            z = mean + eps * std
+        else:
+            z = mean * self.temperature
+
+        # ================================================================
+        # DECODING
+        # ================================================================
+        reconstruction = self.vae_decoder(z)
+        reconstruction = reconstruction.view(reconstruction.size(0), self.encoder_channels[-1],
+                                            self.final_h, self.final_w)
+
+        for layer in self.decoder_layers:
+            reconstruction = layer(reconstruction)
+
+        # Ensure correct spatial dimensions
+        target_h, target_w = self.config.input_size
+        if reconstruction.shape[-2] != target_h or reconstruction.shape[-1] != target_w:
+            reconstruction = F.interpolate(reconstruction, size=(target_h, target_w),
+                                         mode='bilinear', align_corners=False)
+
+        # ================================================================
+        # CONTRASTIVE FEATURES
+        # ================================================================
+        contrastive_features = None
+        if labels is not None:
+            contrastive_features = self.contrastive_head(z)
+
+        # ================================================================
+        # CLASSIFICATION
+        # ================================================================
+        logits = None
+        if self.training_phase == 2:
+            logits = self.classifier(z)
+
+        # ================================================================
+        # BUILD OUTPUT
+        # ================================================================
+        output = {
+            'mean': self._fix_tensor_dim(mean, original_batch_size, duplicated),
+            'log_var': self._fix_tensor_dim(log_var, original_batch_size, duplicated),
+            'z': self._fix_tensor_dim(z, original_batch_size, duplicated),
+            'compressed_embedding': self._fix_tensor_dim(z, original_batch_size, duplicated),
+            'reconstruction': self._fix_tensor_dim(reconstruction, original_batch_size, duplicated),
+            'kl_weight': torch.tensor(self.current_kl_weight, device=x.device)
+        }
+
+        if contrastive_features is not None:
+            output['contrastive_features'] = self._fix_tensor_dim(
+                contrastive_features, original_batch_size, duplicated
+            )
+
+        if logits is not None:
+            output['class_logits'] = self._fix_tensor_dim(logits, original_batch_size, duplicated)
+            output['class_predictions'] = self._fix_tensor_dim(logits.argmax(dim=1), original_batch_size, duplicated)
+            output['class_probabilities'] = self._fix_tensor_dim(F.softmax(logits, dim=1), original_batch_size, duplicated)
+
+        return output
+
+    def compute_loss(self, outputs: Dict, inputs: torch.Tensor, labels: torch.Tensor,
+                     phase: int, epoch: int) -> Tuple[torch.Tensor, float]:
+        """Compute combined VAE + Contrastive + Classification loss"""
+
+        # Update KL weight if annealing
+        if self.use_kl_annealing and self.kl_scheduler is not None:
+            self.current_kl_weight = self.kl_scheduler.step(epoch)
+
+        # ================================================================
+        # 1. VAE LOSS (Reconstruction + KL)
+        # ================================================================
+        recon_loss = F.mse_loss(outputs['reconstruction'], inputs)
+
+        kl_loss = -0.5 * torch.sum(1 + outputs['log_var'] - outputs['mean'].pow(2) - outputs['log_var'].exp(), dim=1)
+        kl_loss = kl_loss.mean()
+
+        kl_weight = self.current_kl_weight if self.use_kl_annealing else self.beta
+
+        # ================================================================
+        # 2. CONTRASTIVE LOSS
+        # ================================================================
+        contrastive_loss = torch.tensor(0.0, device=inputs.device)
+        if phase == 2 and 'contrastive_features' in outputs and labels is not None:
+            try:
+                contrastive_loss = self.contrastive_loss_fn(
+                    outputs['contrastive_features'],
+                    labels
+                )
+                contrastive_loss = torch.clamp(contrastive_loss, max=10.0)
+            except Exception as e:
+                logger.debug(f"Contrastive loss computation failed: {e}")
+                contrastive_loss = torch.tensor(0.0, device=inputs.device)
+
+        # ================================================================
+        # 3. CLASSIFICATION LOSS
+        # ================================================================
+        class_loss = torch.tensor(0.0, device=inputs.device)
+        if phase == 2 and 'class_logits' in outputs:
+            class_loss = F.cross_entropy(outputs['class_logits'], labels)
+            class_loss = torch.clamp(class_loss, max=10.0)
+
+        # ================================================================
+        # 4. COMBINE WITH DYNAMIC WEIGHTING
+        # ================================================================
+        if phase == 1:
+            # Phase 1: Only VAE (unsupervised)
+            total_loss = recon_loss + kl_weight * kl_loss
+        else:
+            # Phase 2: All losses
+            progress = min(1.0, epoch / max(1, self.config.epochs))
+
+            # Dynamic weights - early focus on VAE, later focus on contrastive/classification
+            recon_weight = max(0.05, 0.2 * (1.0 - progress * 0.7))
+            kl_weight_phase2 = max(0.05, 0.15 * (1.0 - progress * 0.5))
+            contrastive_weight = max(0.3, self.contrastive_weight * (0.5 + 0.5 * progress))
+            class_weight = max(0.3, 0.5 * progress)
+
+            # Normalize weights
+            total_w = recon_weight + kl_weight_phase2 + contrastive_weight + class_weight
+            recon_weight /= total_w
+            kl_weight_phase2 /= total_w
+            contrastive_weight /= total_w
+            class_weight /= total_w
+
+            total_loss = (
+                recon_weight * recon_loss +
+                kl_weight_phase2 * kl_loss +
+                contrastive_weight * contrastive_loss +
+                class_weight * class_loss
+            )
+
+        # ================================================================
+        # 5. CALCULATE ACCURACY
+        # ================================================================
+        accuracy = 0.0
+        if phase == 2 and 'class_predictions' in outputs:
+            accuracy = (outputs['class_predictions'] == labels).float().mean().item()
+
+        # Clamp final loss
+        total_loss = torch.clamp(total_loss, max=100.0)
+
+        # Check for NaN
+        if torch.isnan(total_loss) or torch.isinf(total_loss):
+            logger.warning("NaN/Inf in loss - returning zero")
+            return torch.tensor(0.0, device=inputs.device, requires_grad=True), 0.0
+
+        return total_loss, accuracy
+
+class BetaTCVAEWithContrastive(VAEWithContrastive):
+    """
+    Beta-TCVAE with Contrastive Learning Head.
+    Combines total correlation disentanglement with contrastive learning.
+    """
+
+    def __init__(self, config: GlobalConfig):
+        super().__init__(config)
+
+        # Beta-TC specific parameters
+        self.beta_tc = getattr(config, 'beta_tc_weight', 1.0)
+
+        logger.info("=" * 60)
+        logger.info("Beta-TCVAE + Contrastive initialized")
+        logger.info(f"  Beta-TC weight: {self.beta_tc}")
+        logger.info(f"  Latent dimension: {self.latent_dim}")
+        logger.info("=" * 60)
+
+    def compute_vae_loss(self, mean: torch.Tensor, log_var: torch.Tensor,
+                         reconstruction: torch.Tensor, target: torch.Tensor) -> Tuple[torch.Tensor, ...]:
+        """
+        Compute VAE loss with Total Correlation (Beta-TCVAE).
+        """
+        # Reconstruction loss
+        recon_loss = F.mse_loss(reconstruction, target)
+
+        # KL divergence
+        kl_loss = -0.5 * torch.sum(1 + log_var - mean.pow(2) - log_var.exp(), dim=1)
+        kl_loss = kl_loss.mean()
+
+        # Total Correlation (TC) - estimated from batch
+        tc_loss = self._compute_tc_loss(mean, log_var)
+
+        # Apply KL weight
+        kl_weight = self.current_kl_weight if self.use_kl_annealing else self.beta
+
+        # Total VAE loss with Beta-TC
+        vae_loss = recon_loss + kl_weight * kl_loss + self.beta_tc * tc_loss
+
+        return vae_loss, recon_loss, kl_loss, tc_loss
+
+    def _compute_tc_loss(self, mean: torch.Tensor, log_var: torch.Tensor) -> torch.Tensor:
+        """Compute Total Correlation loss for Beta-TCVAE"""
+        batch_size = mean.shape[0]
+        device = mean.device
+
+        # Sample from posterior
+        z = mean + torch.exp(0.5 * log_var) * torch.randn_like(log_var)
+
+        # Compute log q(z) (empirical distribution)
+        # Use kernel density estimation
+        sigma = 0.1
+        distance = torch.cdist(z, z, p=2)
+        kernel = torch.exp(-distance**2 / (2 * sigma**2))
+        log_qz = torch.log(kernel.mean(dim=1) + 1e-8)
+
+        # Compute log prod q(z_i) (product of marginals)
+        n_dim = z.shape[1]
+        log_prod_qz = torch.zeros(batch_size, device=device)
+
+        for dim in range(n_dim):
+            z_dim = z[:, dim].view(-1, 1)
+            distance = torch.cdist(z_dim, z_dim, p=2)
+            kernel = torch.exp(-distance**2 / (2 * sigma**2))
+            log_qz_dim = torch.log(kernel.mean(dim=1) + 1e-8)
+            log_prod_qz += log_qz_dim
+
+        # TC loss
+        tc_loss = (log_qz - log_prod_qz).mean()
+
+        return tc_loss
+
+    def compute_loss(self, outputs: Dict, inputs: torch.Tensor, labels: torch.Tensor,
+                     phase: int, epoch: int) -> Tuple[torch.Tensor, float]:
+        """Compute combined Beta-TCVAE + Contrastive + Classification loss"""
+
+        # Update KL weight if annealing
+        if self.use_kl_annealing and self.kl_scheduler is not None:
+            self.current_kl_weight = self.kl_scheduler.step(epoch)
+
+        # ================================================================
+        # 1. VAE LOSS with Beta-TC
+        # ================================================================
+        vae_loss, recon_loss, kl_loss, tc_loss = self.compute_vae_loss(
+            outputs['mean'],
+            outputs['log_var'],
+            outputs['reconstruction'],
+            inputs
+        )
+
+        # ================================================================
+        # 2. CONTRASTIVE LOSS
+        # ================================================================
+        contrastive_loss = torch.tensor(0.0, device=inputs.device)
+        if phase == 2 and 'contrastive_features' in outputs and labels is not None:
+            try:
+                contrastive_loss = self.contrastive_loss_fn(
+                    outputs['contrastive_features'],
+                    labels
+                )
+                contrastive_loss = torch.clamp(contrastive_loss, max=10.0)
+            except Exception as e:
+                logger.debug(f"Contrastive loss computation failed: {e}")
+                contrastive_loss = torch.tensor(0.0, device=inputs.device)
+
+        # ================================================================
+        # 3. CLASSIFICATION LOSS
+        # ================================================================
+        class_loss = torch.tensor(0.0, device=inputs.device)
+        if phase == 2 and 'class_logits' in outputs:
+            class_loss = F.cross_entropy(outputs['class_logits'], labels)
+            class_loss = torch.clamp(class_loss, max=10.0)
+
+        # ================================================================
+        # 4. COMBINE WITH DYNAMIC WEIGHTING
+        # ================================================================
+        if phase == 1:
+            # Phase 1: Only VAE
+            total_loss = vae_loss
+        else:
+            # Phase 2: All losses
+            progress = min(1.0, epoch / max(1, self.config.epochs))
+
+            # Dynamic weights
+            recon_weight = max(0.05, 0.2 * (1.0 - progress * 0.7))
+            kl_weight_phase2 = max(0.05, 0.15 * (1.0 - progress * 0.5))
+            tc_weight = max(0.05, 0.1 * (1.0 - progress * 0.5))
+            contrastive_weight = max(0.3, self.contrastive_weight * (0.5 + 0.5 * progress))
+            class_weight = max(0.3, 0.5 * progress)
+
+            # Normalize weights
+            total_w = recon_weight + kl_weight_phase2 + tc_weight + contrastive_weight + class_weight
+            recon_weight /= total_w
+            kl_weight_phase2 /= total_w
+            tc_weight /= total_w
+            contrastive_weight /= total_w
+            class_weight /= total_w
+
+            total_loss = (
+                recon_weight * recon_loss +
+                kl_weight_phase2 * kl_loss +
+                tc_weight * tc_loss +
+                contrastive_weight * contrastive_loss +
+                class_weight * class_loss
+            )
+
+        # ================================================================
+        # 5. CALCULATE ACCURACY
+        # ================================================================
+        accuracy = 0.0
+        if phase == 2 and 'class_predictions' in outputs:
+            accuracy = (outputs['class_predictions'] == labels).float().mean().item()
+
+        # Clamp final loss
+        total_loss = torch.clamp(total_loss, max=100.0)
+
+        # Check for NaN
+        if torch.isnan(total_loss) or torch.isinf(total_loss):
+            logger.warning("NaN/Inf in loss - returning zero")
+            return torch.tensor(0.0, device=inputs.device, requires_grad=True), 0.0
+
+        return total_loss, accuracy
 
 class ContrastiveTrainer:
     """
@@ -5184,9 +6191,14 @@ class ContrastiveTrainer:
 # =============================================================================
 
 class PredictionManager:
-    def __init__(self, config: GlobalConfig, model_load_dir: str = None):
+    def __init__(self, config: GlobalConfig, model_load_dir: str = None, model_path: str = None):
         self.config = config
         self.device = torch.device('cuda' if config.use_gpu and torch.cuda.is_available() else 'cpu')
+
+        # Store model path if provided
+        if model_path:
+            self.config.model_path = model_path
+            logger.info(f"Using specified model path: {model_path}")
 
         # ========================================================================
         # OUTPUT DIRECTORY (where predictions and configs are saved)
@@ -5202,9 +6214,9 @@ class PredictionManager:
         self.output_viz_dir = self.output_data_dir / 'visualizations'
 
         # Create output directories
-        #self.output_data_dir.mkdir(parents=True, exist_ok=True)
-        #self.output_checkpoint_dir.mkdir(parents=True, exist_ok=True)
-        #self.output_viz_dir.mkdir(parents=True, exist_ok=True)
+        self.output_data_dir.mkdir(parents=True, exist_ok=True)
+        self.output_checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        self.output_viz_dir.mkdir(parents=True, exist_ok=True)
 
         # ========================================================================
         # MODEL LOADING DIRECTORY (where trained model is stored)
@@ -5225,6 +6237,8 @@ class PredictionManager:
         logger.info("=" * 60)
         logger.info(f"PredictionManager Initialized:")
         logger.info(f"  Model loading from: {self.model_load_dir}")
+        if hasattr(self.config, 'model_path') and self.config.model_path:
+            logger.info(f"  Specific model: {self.config.model_path}")
         logger.info(f"  Data/Stats loading from: {self.data_load_dir}")
         logger.info(f"  Output directory: {self.output_data_dir}")
         logger.info("=" * 60)
@@ -5285,17 +6299,29 @@ class PredictionManager:
         return img_tensor
 
     def _load_model(self):
-        """Load model from checkpoint using model_load_dir (not output_dir)"""
+        """Load model from checkpoint with proper architecture matching and auto-detection."""
         dataset_name_lower = normalize_dataset_name(self.config.dataset_name)
 
         logger.info(f"Looking for model in: {self.model_load_dir}")
 
-        possible_paths = [
-            self.model_load_dir / f"{dataset_name_lower}_best.pt",
-            self.model_load_dir / f"{dataset_name_lower}_latest.pt",
-            self.model_load_dir / 'best.pt',
-            self.model_load_dir / 'latest.pt',
-        ]
+        # Determine model path
+        if hasattr(self.config, 'model_path') and self.config.model_path:
+            model_path = Path(self.config.model_path)
+            if model_path.exists():
+                logger.info(f"Using specified model path: {model_path}")
+                possible_paths = [model_path]
+            else:
+                logger.warning(f"Specified model path not found: {model_path}")
+                possible_paths = []
+        else:
+            possible_paths = [
+                self.model_load_dir / f"best_model_{dataset_name_lower}.pt",
+                self.model_load_dir / f"{dataset_name_lower}_best.pt",
+                self.model_load_dir / 'best.pt',
+                self.model_load_dir / 'best_model.pt',
+                self.model_load_dir / f"{dataset_name_lower}_latest.pt",
+                self.model_load_dir / 'latest.pt',
+            ]
 
         for pattern in ['*.pt', '*.pth']:
             possible_paths.extend(list(self.model_load_dir.glob(pattern)))
@@ -5311,17 +6337,9 @@ class PredictionManager:
         for path in unique_paths:
             if path.exists() and path.stat().st_size > 0:
                 try:
-                    with open(path, 'rb') as f:
-                        header = f.read(4)
-                        is_valid_pickle = header[0] == 0x80 and header[1] in [0x02, 0x03, 0x04]
-                        is_zip = header[:2] == b'PK'
-                        if not (is_valid_pickle or is_zip):
-                            continue
-
                     checkpoint = torch.load(path, map_location=self.device, weights_only=False)
                     if 'model_state_dict' not in checkpoint:
                         continue
-
                     best_path = path
                     logger.info(f"Found valid model at {best_path}")
                     break
@@ -5329,148 +6347,388 @@ class PredictionManager:
                     logger.debug(f"Error checking {path}: {e}")
                     continue
 
-        if best_path and best_path.exists():
-            try:
-                checkpoint = torch.load(best_path, map_location=self.device, weights_only=False)
+        if not best_path:
+            logger.error(f"No valid model found in {self.model_load_dir}")
+            self.model = None
+            return
 
-                if 'model_config' in checkpoint:
-                    model_config = checkpoint['model_config']
-                    for key, value in model_config.items():
-                        if hasattr(self.config, key):
-                            setattr(self.config, key, value)
-                    logger.info("Loaded model architecture from checkpoint")
+        try:
+            checkpoint = torch.load(best_path, map_location=self.device, weights_only=False)
 
-                if 'input_size' in checkpoint:
-                    self.config.input_size = tuple(checkpoint['input_size']) if isinstance(checkpoint['input_size'], list) else checkpoint['input_size']
-                if 'feature_dims' in checkpoint:
-                    self.config.feature_dims = checkpoint['feature_dims']
-                if 'compressed_dims' in checkpoint:
-                    self.config.compressed_dims = checkpoint['compressed_dims']
-                if 'num_classes' in checkpoint:
-                    self.config.num_classes = checkpoint['num_classes']
+            # ================================================================
+            # CRITICAL: Extract COMPLETE architecture from checkpoint
+            # ================================================================
+            state_dict = checkpoint['model_state_dict']
 
-                self.config.input_size_explicitly_set = True
+            # ================================================================
+            # AUTO-DETECT MODEL TYPE FROM STATE DICT
+            # ================================================================
+            has_vae = any('vae_encoder' in k or 'mean_layer' in k or 'logvar_layer' in k for k in state_dict.keys())
+            has_contrastive = any('contrastive_head' in k or 'projection_head' in k for k in state_dict.keys())
+            has_advanced_hybrid = any('conditional_compress' in k or 'shared_decoder' in k for k in state_dict.keys())
+            has_invertible = any('invertible' in k for k in state_dict.keys())
+            has_classifier = any('classifier' in k for k in state_dict.keys())
+            has_cluster = any('cluster_centers' in k for k in state_dict.keys())
 
-                self.model = BaseAutoencoder(self.config)
-                self.model.set_training_phase(2)
+            logger.info("=" * 60)
+            logger.info("Auto-detecting model architecture from checkpoint:")
+            logger.info(f"  VAE components: {'✓' if has_vae else '✗'}")
+            logger.info(f"  Contrastive components: {'✓' if has_contrastive else '✗'}")
+            logger.info(f"  Advanced Hybrid components: {'✓' if has_advanced_hybrid else '✗'}")
+            logger.info(f"  Invertible components: {'✓' if has_invertible else '✗'}")
+            logger.info(f"  Classifier: {'✓' if has_classifier else '✗'}")
+            logger.info(f"  Cluster Centers: {'✓' if has_cluster else '✗'}")
+            logger.info("=" * 60)
 
-                if 'use_per_image_normalization' in checkpoint:
-                    self.config.use_per_image_normalization = checkpoint['use_per_image_normalization']
-                    logger.info(f"Loaded normalization mode: {'PER-IMAGE' if self.config.use_per_image_normalization else 'DATASET-WIDE'}")
-                elif 'normalization_mode' in checkpoint:
-                    norm_mode_str = checkpoint['normalization_mode']
-                    self.config.use_per_image_normalization = (norm_mode_str == 'per_image')
-                    logger.info(f"Loaded normalization mode: {norm_mode_str}")
+            # ================================================================
+            # UPDATE CONFIG WITH DETECTED MODEL TYPE
+            # ================================================================
+            self.config.use_vae = has_vae
+            self.config.use_contrastive_learning = has_contrastive
+            self.config.use_advanced_hybrid = has_advanced_hybrid
+            self.config.use_invertible = has_invertible
 
-                # Load dataset statistics and attach to model
-                if 'dataset_statistics' in checkpoint and checkpoint['dataset_statistics']:
-                    stats_dict = checkpoint['dataset_statistics']
-                    if 'mean' in stats_dict and stats_dict['mean'] is not None:
-                        self.norm_mean = torch.tensor(stats_dict['mean'], dtype=torch.float32)
-                    if 'std' in stats_dict and stats_dict['std'] is not None:
-                        self.norm_std = torch.tensor(stats_dict['std'], dtype=torch.float32)
-                    self.norm_is_fitted = True
-                    self.norm_n_samples = stats_dict.get('n_samples_used', stats_dict.get('n_samples', 0))
-                    logger.info("Loaded dataset statistics from checkpoint")
+            # Extract encoder layers count from state dict
+            encoder_layers = 0
+            encoder_channels = []
 
-                    class StatisticsWrapper:
-                        def __init__(self, mean, std, n_samples):
-                            self.mean = mean
-                            self.std = std
-                            self.is_calculated = True
-                            self.n_samples_used = n_samples
-
-                        def normalize(self, x):
-                            mean = self.mean.to(x.device).view(1, -1, 1, 1)
-                            std = self.std.to(x.device).view(1, -1, 1, 1)
-                            return (x - mean) / (std + 1e-8)
-
-                    stats_wrapper = StatisticsWrapper(self.norm_mean, self.norm_std, self.norm_n_samples)
-                    self.model.set_dataset_statistics(stats_wrapper)
-                    logger.info("=" * 60)
-                    logger.info("TRAINING STATISTICS ATTACHED TO MODEL:")
-                    logger.info(f"  Mean: {self.norm_mean.tolist()}")
-                    logger.info(f"  Std:  {self.norm_std.tolist()}")
-                    logger.info(f"  Samples used: {self.norm_n_samples:,}")
-                    logger.info("=" * 60)
-
-                if 'domain' in checkpoint:
-                    self.domain_info['domain'] = checkpoint['domain']
-                if 'domain_config' in checkpoint:
-                    self.domain_info['domain_config'] = checkpoint['domain_config']
-
-                domain = self.domain_info['domain']
-                if domain != 'general':
-                    self._init_domain_processor(domain, self.domain_info['domain_config'])
-                    logger.info(f"Initialized {domain} domain processor")
-
-                model_state = self.model.state_dict()
-                filtered_state = {}
-                loaded_keys = 0
-                skipped_keys = 0
-
-                for key, value in checkpoint['model_state_dict'].items():
-                    if key in model_state:
-                        if model_state[key].shape == value.shape:
-                            filtered_state[key] = value
-                            loaded_keys += 1
-                        else:
-                            logger.debug(f"Skipping {key}: shape mismatch {value.shape} vs {model_state[key].shape}")
-                            skipped_keys += 1
-                    else:
-                        skipped_keys += 1
-
-                if loaded_keys > 0:
-                    self.model.load_state_dict(filtered_state, strict=False)
-                    logger.info(f"Loaded {loaded_keys} parameters, skipped {skipped_keys}")
+            # Count encoder layers by looking for encoder_layers.X.0.weight
+            i = 0
+            while True:
+                key = f'encoder_layers.{i}.0.weight'
+                if key in state_dict:
+                    shape = state_dict[key].shape
+                    encoder_channels.append(shape[0])  # output channels
+                    encoder_layers += 1
+                    i += 1
                 else:
-                    logger.error("No compatible parameters found in checkpoint")
-                    self.model = None
-                    return
+                    break
 
-                if 'selected_feature_indices' in checkpoint and checkpoint['selected_feature_indices'] is not None:
-                    indices = checkpoint['selected_feature_indices']
-                    if isinstance(indices, torch.Tensor):
-                        self.model._selected_feature_indices = indices.to(self.device)
+            # If no encoder_layers found, try alternative pattern
+            if encoder_layers == 0:
+                i = 0
+                while True:
+                    key = f'encoder_layers.{i}.weight'
+                    if key in state_dict:
+                        shape = state_dict[key].shape
+                        encoder_channels.append(shape[0])
+                        encoder_layers += 1
+                        i += 1
                     else:
-                        self.model._selected_feature_indices = torch.tensor(indices, device=self.device)
-                    self.model._is_feature_selection_frozen = True
-                    logger.info(f"Loaded feature selection with {len(indices)} features")
+                        break
 
-                if 'classifier_state_dict' in checkpoint and checkpoint['classifier_state_dict']:
-                    if hasattr(self.model, 'classifier') and self.model.classifier is not None:
-                        self.model.classifier.load_state_dict(checkpoint['classifier_state_dict'])
-                        logger.info("Loaded classifier state dict")
+            # Extract in_channels from first encoder layer
+            in_channels = 3
+            if encoder_layers > 0:
+                key = f'encoder_layers.0.0.weight'
+                if key in state_dict:
+                    in_channels = state_dict[key].shape[1]
+                else:
+                    key = f'encoder_layers.0.weight'
+                    if key in state_dict:
+                        in_channels = state_dict[key].shape[1]
 
-                if 'cluster_centers' in checkpoint and checkpoint['cluster_centers'] is not None:
-                    if hasattr(self.model, 'cluster_centers') and self.model.cluster_centers is not None:
-                        centers = checkpoint['cluster_centers']
-                        if isinstance(centers, torch.Tensor):
-                            self.model.cluster_centers.data = centers.to(self.device)
+            # Extract feature_dims from embedder
+            feature_dims = None
+            embedder_keys = [k for k in state_dict.keys() if 'embedder.0.weight' in k]
+            if embedder_keys:
+                feature_dims = state_dict[embedder_keys[0]].shape[0]
+
+            # Extract compressed_dims from feature_compressor
+            compressed_dims = None
+            compressor_keys = [k for k in state_dict.keys() if 'feature_compressor.4.weight' in k]
+            if compressor_keys:
+                compressed_dims = state_dict[compressor_keys[0]].shape[0]
+            elif has_vae:
+                # For VAE, compressed_dims is the latent dimension
+                mean_keys = [k for k in state_dict.keys() if 'mean_layer.weight' in k]
+                if mean_keys:
+                    compressed_dims = state_dict[mean_keys[0]].shape[0]
+
+            # Extract flattened_size from embedder input
+            flattened_size = None
+            if embedder_keys:
+                flattened_size = state_dict[embedder_keys[0]].shape[1]
+
+            # Extract num_classes from classifier
+            num_classes = None
+            classifier_keys = [k for k in state_dict.keys() if 'classifier.0.weight' in k]
+            if classifier_keys:
+                num_classes = state_dict[classifier_keys[0]].shape[0]
+            elif 'num_classes' in checkpoint:
+                num_classes = checkpoint['num_classes']
+
+            # Extract input size
+            input_size = (32, 32)
+            if 'input_size' in checkpoint:
+                input_size = tuple(checkpoint['input_size']) if isinstance(checkpoint['input_size'], list) else checkpoint['input_size']
+            elif 'input_size' in checkpoint.get('model_architecture', {}):
+                input_size = tuple(checkpoint['model_architecture']['input_size'])
+
+            logger.info("=" * 60)
+            logger.info("Extracted COMPLETE architecture from checkpoint:")
+            logger.info(f"  Encoder layers: {encoder_layers}")
+            logger.info(f"  Encoder channels: {encoder_channels}")
+            logger.info(f"  In channels: {in_channels}")
+            logger.info(f"  Flattened size: {flattened_size}")
+            logger.info(f"  Feature dims: {feature_dims}")
+            logger.info(f"  Compressed dims: {compressed_dims}")
+            logger.info(f"  Num classes: {num_classes}")
+            logger.info(f"  Input size: {input_size}")
+            logger.info("=" * 60)
+
+            # ================================================================
+            # UPDATE CONFIG WITH CHECKPOINT ARCHITECTURE
+            # ================================================================
+            if feature_dims is not None:
+                self.config.feature_dims = feature_dims
+            if compressed_dims is not None:
+                self.config.compressed_dims = compressed_dims
+            if num_classes is not None:
+                self.config.num_classes = num_classes
+            if input_size is not None:
+                self.config.input_size = input_size
+            if in_channels is not None:
+                self.config.in_channels = in_channels
+
+            # Store encoder architecture for the model to use
+            self.config.encoder_layers = encoder_layers
+            self.config.encoder_channels = encoder_channels
+            self.config.flattened_size = flattened_size
+            self.config.input_size_explicitly_set = True
+            self.config.force_fixed_compressed_dims = True
+
+            logger.info("=" * 60)
+            logger.info("Building model with COMPLETE restored architecture:")
+            logger.info(f"  Input size: {self.config.input_size}")
+            logger.info(f"  Encoder layers: {encoder_layers}")
+            logger.info(f"  Encoder channels: {encoder_channels}")
+            logger.info(f"  Feature dims: {self.config.feature_dims}")
+            logger.info(f"  Compressed dims: {self.config.compressed_dims}")
+            logger.info(f"  Num classes: {self.config.num_classes}")
+            logger.info(f"  Model type: {'VAE+Contrastive' if has_vae and has_contrastive else 'VAE' if has_vae else 'Contrastive' if has_contrastive else 'Base'}")
+            logger.info("=" * 60)
+
+            # ================================================================
+            # BUILD MODEL WITH EXACT ARCHITECTURE USING ModelFactory
+            # ================================================================
+            # Use ModelFactory (defined in this file) to create the correct model type
+            self.model = ModelFactory.create_model(self.config)
+
+            # ================================================================
+            # LOAD THE COMPLETE MODEL STATE DICT
+            # ================================================================
+            # Try strict loading first
+            try:
+                self.model.load_state_dict(checkpoint['model_state_dict'], strict=True)
+                logger.info("Model loaded successfully with strict matching")
+            except RuntimeError as e:
+                logger.warning(f"Strict loading failed: {e}")
+                logger.info("Attempting non-strict loading...")
+
+                # For VAE+Contrastive combined model, we need to handle the loading carefully
+                if has_vae and has_contrastive:
+                    # Check if we have VAEWithContrastive loaded
+                    if isinstance(self.model, VAEWithContrastive):
+                        logger.info("Using VAEWithContrastive model - loading weights carefully")
+
+                        # Load with strict=False but check for critical mismatches
+                        missing_keys, unexpected_keys = self.model.load_state_dict(
+                            checkpoint['model_state_dict'], strict=False
+                        )
+
+                        # Log what's missing/unexpected
+                        if missing_keys:
+                            # Filter out optional components
+                            optional_missing = [k for k in missing_keys if 'cluster_centers' in k or 'selected_feature' in k]
+                            critical_missing = [k for k in missing_keys if k not in optional_missing]
+
+                            if critical_missing:
+                                logger.warning(f"Critical missing keys: {critical_missing[:5]}...")
+                                # Try to handle specific cases
+                                for key in critical_missing:
+                                    if 'classifier' in key:
+                                        logger.warning(f"Classifier keys missing - will be reinitialized")
+                                    elif 'contrastive_head' in key:
+                                        logger.warning(f"Contrastive head keys missing - will be reinitialized")
                         else:
-                            self.model.cluster_centers.data = torch.tensor(centers, device=self.device)
-                        logger.info(f"Loaded {len(self.model.cluster_centers)} cluster centers")
+                            logger.info("All model keys loaded successfully")
 
-                checkpoint_phase = checkpoint.get('phase', 2)
+                        if unexpected_keys:
+                            logger.debug(f"Unexpected keys (ignored): {unexpected_keys[:3]}...")
+                    else:
+                        # Fallback to standard loading
+                        missing_keys, unexpected_keys = self.model.load_state_dict(
+                            checkpoint['model_state_dict'], strict=False
+                        )
+                else:
+                    # Standard loading for non-combined models
+                    missing_keys, unexpected_keys = self.model.load_state_dict(
+                        checkpoint['model_state_dict'], strict=False
+                    )
+
+                if missing_keys:
+                    critical_missing = [k for k in missing_keys if 'classifier' not in k and 'cluster_centers' not in k and 'selected_feature' not in k and 'contrastive_head' not in k and 'projection_head' not in k]
+                    if critical_missing:
+                        logger.warning(f"Critical missing keys: {critical_missing[:5]}...")
+                    else:
+                        logger.info(f"Model loaded (missing only optional components)")
+
+                if unexpected_keys:
+                    logger.debug(f"Unexpected keys (ignored): {unexpected_keys[:3]}...")
+
+            # ================================================================
+            # HANDLE CLASSIFIER (if present in checkpoint but not in model)
+            # ================================================================
+            if 'classifier_state_dict' in checkpoint and checkpoint['classifier_state_dict']:
+                if hasattr(self.model, 'classifier') and self.model.classifier is not None:
+                    try:
+                        self.model.classifier.load_state_dict(checkpoint['classifier_state_dict'], strict=False)
+                        logger.info("Loaded classifier state dict")
+                    except Exception as e:
+                        logger.warning(f"Could not load classifier: {e}")
+                        # Try to rebuild classifier
+                        try:
+                            new_classifier = self._rebuild_classifier_from_checkpoint(
+                                checkpoint['classifier_state_dict']
+                            )
+                            if new_classifier:
+                                self.model.classifier = new_classifier.to(self.device)
+                                logger.info("Rebuilt classifier from checkpoint")
+                        except Exception as e2:
+                            logger.warning(f"Failed to rebuild classifier: {e2}")
+                elif has_vae and has_contrastive:
+                    # For VAEWithContrastive, classifier is built in __init__
+                    logger.info("Classifier is already built in VAEWithContrastive model")
+
+            # ================================================================
+            # HANDLE CONTRASTIVE HEAD (if present in checkpoint)
+            # ================================================================
+            if has_contrastive and hasattr(self.model, 'contrastive_head'):
+                # Check if contrastive_head weights were loaded
+                contrastive_keys = [k for k in state_dict.keys() if 'contrastive_head' in k]
+                if contrastive_keys:
+                    logger.info(f"Contrastive head present in checkpoint ({len(contrastive_keys)} keys)")
+                else:
+                    logger.info("Contrastive head not found in checkpoint - will use initialized weights")
+
+            # ================================================================
+            # HANDLE CLUSTER CENTERS
+            # ================================================================
+            if 'cluster_centers' in checkpoint and checkpoint['cluster_centers'] is not None:
+                if hasattr(self.model, 'cluster_centers') and self.model.cluster_centers is not None:
+                    centers = checkpoint['cluster_centers']
+                    if isinstance(centers, torch.Tensor):
+                        if centers.shape == self.model.cluster_centers.shape:
+                            self.model.cluster_centers.data = centers.to(self.device)
+                            logger.info(f"Loaded {len(self.model.cluster_centers)} cluster centers")
+                        else:
+                            logger.warning(f"Cluster centers shape mismatch: checkpoint {centers.shape} vs model {self.model.cluster_centers.shape}")
+                    else:
+                        logger.warning("Cluster centers in checkpoint is not a tensor")
+                else:
+                    logger.info("Model does not have cluster_centers attribute - skipping")
+
+            # ================================================================
+            # LOAD FEATURE SELECTION
+            # ================================================================
+            if 'selected_feature_indices' in checkpoint and checkpoint['selected_feature_indices'] is not None:
+                indices = checkpoint['selected_feature_indices']
+                if isinstance(indices, torch.Tensor):
+                    self.model._selected_feature_indices = indices.to(self.device)
+                else:
+                    self.model._selected_feature_indices = torch.tensor(indices, device=self.device)
+                self.model._is_feature_selection_frozen = True
+                logger.info(f"Loaded feature selection with {len(indices)} features")
+
+            # ================================================================
+            # LOAD NORMALIZATION STATISTICS
+            # ================================================================
+            if 'dataset_statistics' in checkpoint and checkpoint['dataset_statistics']:
+                stats_dict = checkpoint['dataset_statistics']
+                if 'mean' in stats_dict and stats_dict['mean'] is not None:
+                    self.norm_mean = torch.tensor(stats_dict['mean'], dtype=torch.float32)
+                if 'std' in stats_dict and stats_dict['std'] is not None:
+                    self.norm_std = torch.tensor(stats_dict['std'], dtype=torch.float32)
+                self.norm_is_fitted = True
+                self.norm_n_samples = stats_dict.get('n_samples_used', stats_dict.get('n_samples', 0))
+                logger.info("Loaded dataset statistics from checkpoint")
+
+                class StatisticsWrapper:
+                    def __init__(self, mean, std, n_samples):
+                        self.mean = mean
+                        self.std = std
+                        self.is_calculated = True
+                        self.n_samples_used = n_samples
+
+                    def normalize(self, x):
+                        mean = self.mean.to(x.device).view(1, -1, 1, 1)
+                        std = self.std.to(x.device).view(1, -1, 1, 1)
+                        return (x - mean) / (std + 1e-8)
+
+                stats_wrapper = StatisticsWrapper(self.norm_mean, self.norm_std, self.norm_n_samples)
+                self.model.set_dataset_statistics(stats_wrapper)
+                logger.info("=" * 60)
+                logger.info("TRAINING STATISTICS ATTACHED TO MODEL:")
+                logger.info(f"  Mean: {self.norm_mean.tolist()}")
+                logger.info(f"  Std:  {self.norm_std.tolist()}")
+                logger.info(f"  Samples used: {self.norm_n_samples:,}")
+                logger.info("=" * 60)
+
+            # ================================================================
+            # HANDLE VAE-SPECIFIC COMPONENTS
+            # ================================================================
+            if has_vae and hasattr(self.model, 'vae_encoder'):
+                # VAE-specific loading - check if KL annealing should be enabled
+                if 'vae_config' in checkpoint:
+                    vae_config = checkpoint['vae_config']
+                    if 'use_kl_annealing' in vae_config:
+                        self.model.use_kl_annealing = vae_config['use_kl_annealing']
+                        logger.info(f"Set KL annealing to: {self.model.use_kl_annealing}")
+                    if 'vae_beta' in vae_config:
+                        self.model.beta = vae_config['vae_beta']
+                        logger.info(f"Set VAE beta to: {self.model.beta}")
+
+                # Set model to inference mode (deterministic)
+                if hasattr(self.model, 'set_deterministic_mode'):
+                    self.model.set_deterministic_mode(enabled=True, single_image=True)
+
+            # ================================================================
+            # SET MODEL STATE
+            # ================================================================
+            checkpoint_phase = checkpoint.get('phase', 2)
+            if hasattr(self.model, 'set_training_phase'):
                 self.model.set_training_phase(checkpoint_phase)
-                self.model.eval()
-                self.model.to(self.device)
+            self.model.eval()
+            self.model.to(self.device)
 
-                logger.info(f"Successfully loaded model from {best_path}")
-                logger.info(f"Model phase: {checkpoint_phase}")
-                logger.info(f"Model expects input size: {self.config.input_size}")
-                return
+            if hasattr(self.model, 'set_deterministic_mode'):
+                self.model.set_deterministic_mode(enabled=True, single_image=True)
 
-            except Exception as e:
-                logger.error(f"Failed to load model from {best_path}: {e}")
-                traceback.print_exc()
-                self.model = None
-                return
+            # ================================================================
+            # LOG FINAL STATUS
+            # ================================================================
+            logger.info("=" * 60)
+            logger.info("MODEL LOADED SUCCESSFULLY")
+            logger.info(f"  Checkpoint: {best_path}")
+            logger.info(f"  Phase: {checkpoint_phase}")
+            logger.info(f"  Input size: {self.config.input_size}")
+            logger.info(f"  Feature dims: {self.config.feature_dims}")
+            logger.info(f"  Compressed dims: {self.config.compressed_dims}")
+            logger.info(f"  Classes: {self.config.num_classes}")
+            logger.info(f"  Model type: {'VAE+Contrastive' if has_vae and has_contrastive else 'VAE' if has_vae else 'Contrastive' if has_contrastive else 'Base'}")
+            if hasattr(self.model, 'encoder_channels'):
+                logger.info(f"  Encoder channels: {self.model.encoder_channels}")
+            if has_vae and hasattr(self.model, 'latent_dim'):
+                logger.info(f"  Latent dimension: {self.model.latent_dim}")
+            if has_contrastive and hasattr(self.model, 'contrastive_head'):
+                logger.info(f"  Contrastive head: present")
+            logger.info("=" * 60)
 
-        logger.error(f"No valid model found in {self.model_load_dir}")
-        logger.error(f"Available files: {[p.name for p in self.model_load_dir.glob('*')]}")
-        logger.error("Please train the model first with: python cdbnn.py --mode train")
-        self.model = None
+        except Exception as e:
+            logger.error(f"Failed to load model from {best_path}: {e}")
+            traceback.print_exc()
+            self.model = None
 
     def _init_domain_processor(self, domain: str, domain_config: Dict):
         """Initialize domain processor"""
@@ -5857,6 +7115,123 @@ class PredictionManager:
         column_names = feature_columns.copy()
         column_names.append('target')  # Only target, no prediction/confidence/uncertainty
         return column_names
+
+    def _rebuild_classifier_from_checkpoint(self, classifier_state_dict):
+        """Rebuild classifier to match checkpoint architecture."""
+        try:
+            # Determine the architecture from the state dict keys
+            layer_sizes = {}
+            for key in classifier_state_dict.keys():
+                if 'weight' in key and not 'running' in key and not 'num_batches' in key:
+                    parts = key.split('.')
+                    if len(parts) >= 2 and parts[0].isdigit():
+                        idx = int(parts[0])
+                        weight_shape = classifier_state_dict[key].shape
+                        if len(weight_shape) == 2:
+                            layer_sizes[idx] = weight_shape[0]  # output size
+
+            if not layer_sizes:
+                logger.warning("Could not determine classifier architecture from checkpoint")
+                return None
+
+            # Get the layer sizes in order
+            max_idx = max(layer_sizes.keys())
+            sizes = [layer_sizes.get(i, None) for i in range(max_idx + 1)]
+            sizes = [s for s in sizes if s is not None]
+
+            if not sizes:
+                return None
+
+            # Build the classifier
+            input_dim = self.config.compressed_dims
+            layers = []
+
+            for i, out_dim in enumerate(sizes):
+                layers.append(nn.Linear(input_dim, out_dim))
+                if i < len(sizes) - 1:  # Not the last layer
+                    layers.append(nn.BatchNorm1d(out_dim))
+                    layers.append(nn.ReLU(inplace=True))
+                    layers.append(nn.Dropout(0.3))
+                input_dim = out_dim
+
+            classifier = nn.Sequential(*layers)
+
+            # Load the state dict
+            classifier.load_state_dict(classifier_state_dict, strict=False)
+
+            logger.info(f"Rebuilt classifier with architecture: {[self.config.compressed_dims] + sizes}")
+            return classifier
+
+        except Exception as e:
+            logger.warning(f"Failed to rebuild classifier: {e}")
+            return None
+
+    def _extract_architecture_from_state_dict(self, state_dict):
+        """Extract architecture information from state dict."""
+        arch_info = {}
+
+        # Extract embedding dimensions
+        for key in state_dict.keys():
+            if 'embedder.0.weight' in key:
+                shape = state_dict[key].shape
+                arch_info['embedder_out'] = shape[0]
+                arch_info['embedder_in'] = shape[1]
+            elif 'unembedder_projection.weight' in key:
+                shape = state_dict[key].shape
+                arch_info['unembedder_out'] = shape[0]
+                arch_info['unembedder_in'] = shape[1]
+            elif 'feature_compressor.0.weight' in key:
+                shape = state_dict[key].shape
+                arch_info['compressor_out'] = shape[0]
+                arch_info['compressor_in'] = shape[1]
+            elif 'feature_decompressor.4.weight' in key:
+                shape = state_dict[key].shape
+                arch_info['decompressor_out'] = shape[0]
+                arch_info['decompressor_in'] = shape[1]
+
+        # Extract encoder channels from first layer
+        for key in state_dict.keys():
+            if 'encoder_layers.0.0.weight' in key:
+                shape = state_dict[key].shape
+                arch_info['encoder_layer0_out'] = shape[0]
+                arch_info['encoder_layer0_in'] = shape[1]
+                break
+
+        # Count encoder layers and get all channel sizes
+        encoder_channels = []
+        i = 0
+        while True:
+            key = f'encoder_layers.{i}.0.weight'
+            if key in state_dict:
+                shape = state_dict[key].shape
+                encoder_channels.append(shape[0])  # output channels
+                i += 1
+            else:
+                break
+
+        if encoder_channels:
+            arch_info['encoder_channels'] = encoder_channels
+            arch_info['encoder_layers'] = len(encoder_channels)
+
+        # Determine feature_dims
+        if 'embedder_out' in arch_info:
+            arch_info['feature_dims'] = arch_info['embedder_out']
+        elif 'compressor_in' in arch_info:
+            arch_info['feature_dims'] = arch_info['compressor_in']
+
+        # Determine compressed_dims
+        if 'compressor_out' in arch_info:
+            arch_info['compressed_dims'] = arch_info['compressor_out']
+        elif 'decompressor_in' in arch_info:
+            arch_info['compressed_dims'] = arch_info['decompressor_in']
+
+        # Determine flattened_size
+        if 'unembedder_out' in arch_info:
+            arch_info['flattened_size'] = arch_info['unembedder_out']
+        elif 'embedder_in' in arch_info:
+            arch_info['flattened_size'] = arch_info['embedder_in']
+
+        return arch_info
 
 # =============================================================================
 # COMPLETE TRAINER - All original functionality preserved
@@ -7297,7 +8672,6 @@ def deterministic_train(
 
     # Create scheduler
     if use_cosine_scheduler:
-        # Adjust T_max for additional epochs if resuming
         if resume and additional_epochs:
             total_epochs = start_epoch + additional_epochs
             scheduler = optim.lr_scheduler.CosineAnnealingLR(
@@ -7378,35 +8752,56 @@ def deterministic_train(
             return x
 
     def compute_enhanced_loss(outputs, inputs, labels, phase, epoch):
-        """NUMERICALLY STABLE loss computation with adaptive label smoothing"""
+        """
+        NUMERICALLY STABLE loss computation with adaptive label smoothing.
+        SAFE FOR BOTH CONTRASTIVE AND NON-CONTRASTIVE MODES.
+        """
+        device = inputs.device
+
+        # ================================================================
+        # 1. RECONSTRUCTION LOSS (Always computed)
+        # ================================================================
         recon_loss = F.smooth_l1_loss(outputs['reconstruction'], inputs, beta=0.1)
         recon_loss = torch.clamp(recon_loss, max=10.0)
         total_loss = recon_loss
         accuracy = None
 
-        # Contrastive learning support
+        # ================================================================
+        # 2. CONTRASTIVE LOSS - ALWAYS INITIALIZED
+        # ================================================================
+        contrastive_loss = torch.tensor(0.0, device=device)
+
         if use_contrastive and hasattr(model, 'compute_contrastive_loss'):
-            if 'contrastive_features' in outputs:
-                contrastive_loss = model.compute_contrastive_loss(
-                    outputs['contrastive_features'],
-                    labels
-                )
-                contrastive_loss = torch.clamp(contrastive_loss, max=10.0)
-                total_loss = total_loss + contrastive_loss
-                logger.debug(f"Contrastive loss: {contrastive_loss.item():.4f}")
+            if 'contrastive_features' in outputs and labels is not None:
+                try:
+                    contrastive_loss = model.compute_contrastive_loss(
+                        outputs['contrastive_features'],
+                        labels
+                    )
+                    contrastive_loss = torch.clamp(contrastive_loss, max=10.0)
+                except Exception as e:
+                    logger.warning(f"Contrastive loss computation failed: {e}")
+                    contrastive_loss = torch.tensor(0.0, device=device)
+
+        # ================================================================
+        # 3. CLASSIFICATION LOSS - ALWAYS INITIALIZED
+        # ================================================================
+        class_loss = torch.tensor(0.0, device=device)
 
         if phase == 2 and config.use_class_encoding and 'class_logits' in outputs:
             n_classes = config.num_classes or 2
             logits = outputs['class_logits']
             logits = torch.clamp(logits, min=-50, max=50)
 
-            # Adaptive label smoothing
+            # Adaptive label smoothing (safe for all datasets)
             if n_classes >= 100:
-                smoothing = max(0.05, 0.2 * (1.0 - min(1.0, epoch / config.epochs)))
+                smoothing = max(0.05, 0.2 * (1.0 - min(1.0, epoch / max(1, config.epochs))))
             elif n_classes >= 50:
-                smoothing = max(0.05, 0.15 * (1.0 - min(1.0, epoch / config.epochs)))
+                smoothing = max(0.05, 0.15 * (1.0 - min(1.0, epoch / max(1, config.epochs))))
+            elif n_classes >= 20:
+                smoothing = max(0.03, 0.1 * (1.0 - min(1.0, epoch / max(1, config.epochs))))
             else:
-                smoothing = max(0.05, 0.1 * (1.0 - min(1.0, epoch / config.epochs)))
+                smoothing = max(0.01, 0.05 * (1.0 - min(1.0, epoch / max(1, config.epochs))))
 
             if smoothing > 0:
                 smooth_labels = torch.full_like(logits, smoothing / n_classes)
@@ -7416,14 +8811,34 @@ def deterministic_train(
                 class_loss = F.cross_entropy(logits, labels)
 
             class_loss = torch.clamp(class_loss, max=10.0)
-            total_loss = total_loss + class_loss
+
+            # ================================================================
+            # 4. DYNAMIC LOSS WEIGHTING
+            # ================================================================
+            if use_contrastive and phase == 2:
+                progress = min(1.0, epoch / max(1, config.epochs))
+                contrastive_weight = max(0.3, 1.0 - progress * 0.7)
+                class_weight = max(0.3, progress * 0.7)
+                recon_weight = 0.1
+
+                total_loss = (
+                    recon_weight * recon_loss +
+                    contrastive_weight * contrastive_loss +
+                    class_weight * class_loss
+                )
+            else:
+                total_loss = recon_loss + class_loss
+
             accuracy = (logits.argmax(dim=1) == labels).float().mean().item()
 
+        # ================================================================
+        # 5. FINAL SAFETY CLAMPS
+        # ================================================================
         total_loss = torch.clamp(total_loss, max=100.0)
 
         if torch.isnan(total_loss) or torch.isinf(total_loss):
             logger.warning("NaN/Inf detected in loss - returning zero")
-            return torch.tensor(0.0, device=device, requires_grad=True), accuracy
+            return torch.tensor(0.0, device=device, requires_grad=True), 0.0
 
         return total_loss, accuracy
 
@@ -7461,7 +8876,9 @@ def deterministic_train(
     checkpoint_dir = Path(checkpoint_dir) if checkpoint_dir else Path(config.checkpoint_dir)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-    # Define best metrics variables
+    # ================================================================
+    # INITIALIZE BEST METRICS
+    # ================================================================
     best_loss = float('inf')
     best_accuracy = 0.0
     best_epoch = 0
@@ -7476,103 +8893,9 @@ def deterministic_train(
         except Exception as e:
             logger.warning(f"Could not load history: {e}")
 
-    def save_checkpoint(epoch, phase, loss, accuracy, is_best):
-        """Save checkpoint with complete state for resume"""
-        nonlocal best_loss, best_accuracy, best_epoch, best_phase
-
-        if loss is None or (isinstance(loss, float) and (np.isnan(loss) or np.isinf(loss))):
-            logger.warning(f"Skipping checkpoint save - invalid loss: {loss}")
-            return
-
-        checkpoint = {
-            'epoch': epoch,
-            'phase': phase,
-            'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'scheduler_state_dict': scheduler.state_dict(),
-            'loss': loss if loss is not None else float('inf'),
-            'accuracy': accuracy if accuracy is not None else 0.0,
-            'best_loss': best_loss,
-            'best_accuracy': best_accuracy,
-            'best_epoch': best_epoch,
-            'best_phase': best_phase,
-            'history': dict(history),
-            'normalization_mode': config.normalization_mode,
-            'use_per_image_normalization': config.use_per_image_normalization,
-            'use_contrastive_learning': use_contrastive,
-            'clustering_mode': 'contrastive' if use_contrastive else 'enhanced',
-            'deterministic': True,
-            'feature_dims': config.feature_dims,
-            'compressed_dims': config.compressed_dims,
-            'in_channels': config.in_channels,
-            'num_classes': config.num_classes,
-            'input_size': list(config.input_size),
-            'timestamp': datetime.now().isoformat(),
-        }
-
-        # Add contrastive-specific parameters
-        if use_contrastive:
-            checkpoint['contrastive_temperature'] = config.contrastive_temperature
-            checkpoint['contrastive_weight'] = config.contrastive_weight
-            if hasattr(model, 'projection_head'):
-                checkpoint['projection_dim'] = config.contrastive_projection_dim
-
-        # Save dataset statistics
-        if not use_per_image_norm and statistics_calculator and statistics_calculator.is_calculated:
-            if statistics_calculator.mean is not None and statistics_calculator.std is not None:
-                checkpoint['dataset_statistics'] = {
-                    'mean': statistics_calculator.mean.cpu().tolist(),
-                    'std': statistics_calculator.std.cpu().tolist(),
-                    'per_channel_min': statistics_calculator.per_channel_min.cpu().tolist() if statistics_calculator.per_channel_min is not None else None,
-                    'per_channel_max': statistics_calculator.per_channel_max.cpu().tolist() if statistics_calculator.per_channel_max is not None else None,
-                    'n_samples_used': statistics_calculator.n_samples_used,
-                    'normalization_type': 'dataset_wide',
-                    'mode': statistics_calculator.mode,
-                    'is_calculated': statistics_calculator.is_calculated
-                }
-
-                # Save statistics file
-                dataset_name_lower = normalize_dataset_name(config.dataset_name)
-                stats_path = checkpoint_dir / f"{dataset_name_lower}_norm_stats.pt"
-                stats_dict = {
-                    'mean': statistics_calculator.mean.cpu(),
-                    'std': statistics_calculator.std.cpu(),
-                    'per_channel_min': statistics_calculator.per_channel_min.cpu() if statistics_calculator.per_channel_min is not None else None,
-                    'per_channel_max': statistics_calculator.per_channel_max.cpu() if statistics_calculator.per_channel_max is not None else None,
-                    'n_samples': statistics_calculator.n_samples_used,
-                    'is_fitted': True,
-                    'timestamp': datetime.now().isoformat()
-                }
-                torch.save(stats_dict, stats_path)
-                logger.info(f"Normalization statistics saved to {stats_path}")
-
-        # Add optional components
-        if hasattr(model, 'classifier') and model.classifier is not None:
-            checkpoint['classifier_state_dict'] = model.classifier.state_dict()
-        if hasattr(model, 'cluster_centers') and model.cluster_centers is not None:
-            checkpoint['cluster_centers'] = model.cluster_centers.data.cpu()
-        if hasattr(model, '_selected_feature_indices') and model._selected_feature_indices is not None:
-            checkpoint['selected_feature_indices'] = model._selected_feature_indices.cpu()
-
-        # Save latest checkpoint
-        torch.save(checkpoint, checkpoint_dir / 'latest.pt')
-        logger.info(f"Saved latest checkpoint (Phase {phase}, Epoch {epoch+1}, Loss: {loss:.6f})")
-
-        # Save best checkpoint
-        if is_best and accuracy is not None and accuracy > 0:
-            torch.save(checkpoint, checkpoint_dir / 'best.pt')
-            best_loss = loss
-            best_accuracy = accuracy
-            best_epoch = epoch
-            best_phase = phase
-            logger.info(f"✓ Best model saved - Epoch {epoch+1}, Accuracy: {accuracy:.4f} ({accuracy:.2%})")
-
-            # Named copy
-            dataset_name_lower = normalize_dataset_name(config.dataset_name)
-            named_best_path = checkpoint_dir / f"{dataset_name_lower}_best.pt"
-            torch.save(checkpoint, named_best_path)
-            logger.info(f"✓ Named best model saved to {named_best_path}")
-
+    # ================================================================
+    # TRAIN PHASE FUNCTION
+    # ================================================================
     def train_phase(phase, epochs, start_epoch=0):
         nonlocal best_loss, best_accuracy, best_epoch, best_phase
 
@@ -7642,7 +8965,6 @@ def deterministic_train(
                 pbar.set_postfix({'loss': f"{train_loss/n_batches:.4f}" if n_batches > 0 else 'nan',
                                 'lr': f"{optimizer.param_groups[0]['lr']:.2e}"})
 
-                # Diagnostic for first batch of resumed training
                 if phase == 1 and epoch == start_epoch and batch_idx == 0 and resume:
                     logger.info("=" * 60)
                     logger.info("RESUME DIAGNOSTIC: First Batch Statistics")
@@ -7675,12 +8997,23 @@ def deterministic_train(
                     if is_better:
                         phase_best_accuracy = val_acc
                         phase_best_loss = val_loss
-                        save_checkpoint(epoch, phase, val_loss, val_acc, is_best=True)
+                        # Call standalone save_checkpoint
+                        best_loss, best_accuracy, best_epoch, best_phase = save_checkpoint(
+                            epoch, phase, val_loss, val_acc, True,
+                            model, optimizer, scheduler, config, checkpoint_dir,
+                            statistics_calculator, use_contrastive, history,
+                            use_per_image_norm, best_loss, best_accuracy, best_epoch, best_phase
+                        )
                         patience_counter = 0
                         logger.info(f"  ✓ New best accuracy: {val_acc:.4f} ({val_acc:.2%})")
                     else:
                         patience_counter += 1
-                        save_checkpoint(epoch, phase, val_loss, val_acc, is_best=False)
+                        best_loss, best_accuracy, best_epoch, best_phase = save_checkpoint(
+                            epoch, phase, val_loss, val_acc, False,
+                            model, optimizer, scheduler, config, checkpoint_dir,
+                            statistics_calculator, use_contrastive, history,
+                            use_per_image_norm, best_loss, best_accuracy, best_epoch, best_phase
+                        )
 
                     print(f"{epoch+1:6d} | {avg_train_loss:12.6f} | {val_loss:12.6f} | "
                           f"{avg_train_acc:9.2%} | {val_acc:9.2%} | {phase_best_accuracy:9.2%} | {current_lr:12.2e}")
@@ -7690,14 +9023,24 @@ def deterministic_train(
                     is_better = val_loss < phase_best_loss
                     if is_better:
                         phase_best_loss = val_loss
-                        save_checkpoint(epoch, phase, val_loss, val_acc, is_best=False)
+                        best_loss, best_accuracy, best_epoch, best_phase = save_checkpoint(
+                            epoch, phase, val_loss, val_acc, False,
+                            model, optimizer, scheduler, config, checkpoint_dir,
+                            statistics_calculator, use_contrastive, history,
+                            use_per_image_norm, best_loss, best_accuracy, best_epoch, best_phase
+                        )
                         patience_counter = 0
                         if val_loss < best_loss:
                             best_loss = val_loss
                         logger.info(f"  ✓ Loss improved to {val_loss:.6f}")
                     else:
                         patience_counter += 1
-                        save_checkpoint(epoch, phase, val_loss, val_acc, is_best=False)
+                        best_loss, best_accuracy, best_epoch, best_phase = save_checkpoint(
+                            epoch, phase, val_loss, val_acc, False,
+                            model, optimizer, scheduler, config, checkpoint_dir,
+                            statistics_calculator, use_contrastive, history,
+                            use_per_image_norm, best_loss, best_accuracy, best_epoch, best_phase
+                        )
 
                     print(f"{epoch+1:6d} | {avg_train_loss:12.6f} | {val_loss:12.6f} | {current_lr:12.2e}")
                 else:
@@ -7713,16 +9056,22 @@ def deterministic_train(
                     if is_better:
                         phase_best_accuracy = avg_train_acc
                         phase_best_loss = avg_train_loss
-                        save_checkpoint(epoch, phase, avg_train_loss, avg_train_acc, is_best=True)
-                        best_accuracy = avg_train_acc
-                        best_loss = avg_train_loss
-                        best_epoch = epoch
-                        best_phase = phase
+                        best_loss, best_accuracy, best_epoch, best_phase = save_checkpoint(
+                            epoch, phase, avg_train_loss, avg_train_acc, True,
+                            model, optimizer, scheduler, config, checkpoint_dir,
+                            statistics_calculator, use_contrastive, history,
+                            use_per_image_norm, best_loss, best_accuracy, best_epoch, best_phase
+                        )
                         patience_counter = 0
                         logger.info(f"  ✓ New best accuracy: {avg_train_acc:.4f} ({avg_train_acc:.2%})")
                     else:
                         patience_counter += 1
-                        save_checkpoint(epoch, phase, avg_train_loss, avg_train_acc, is_best=False)
+                        best_loss, best_accuracy, best_epoch, best_phase = save_checkpoint(
+                            epoch, phase, avg_train_loss, avg_train_acc, False,
+                            model, optimizer, scheduler, config, checkpoint_dir,
+                            statistics_calculator, use_contrastive, history,
+                            use_per_image_norm, best_loss, best_accuracy, best_epoch, best_phase
+                        )
 
                     if isinstance(scheduler, optim.lr_scheduler.ReduceLROnPlateau):
                         scheduler.step(avg_train_loss)
@@ -7736,14 +9085,24 @@ def deterministic_train(
                     is_better = avg_train_loss < phase_best_loss
                     if is_better:
                         phase_best_loss = avg_train_loss
-                        save_checkpoint(epoch, phase, avg_train_loss, avg_train_acc, is_best=False)
+                        best_loss, best_accuracy, best_epoch, best_phase = save_checkpoint(
+                            epoch, phase, avg_train_loss, avg_train_acc, False,
+                            model, optimizer, scheduler, config, checkpoint_dir,
+                            statistics_calculator, use_contrastive, history,
+                            use_per_image_norm, best_loss, best_accuracy, best_epoch, best_phase
+                        )
                         patience_counter = 0
                         if avg_train_loss < best_loss:
                             best_loss = avg_train_loss
                         logger.info(f"  ✓ Loss improved to {avg_train_loss:.6f}")
                     else:
                         patience_counter += 1
-                        save_checkpoint(epoch, phase, avg_train_loss, avg_train_acc, is_best=False)
+                        best_loss, best_accuracy, best_epoch, best_phase = save_checkpoint(
+                            epoch, phase, avg_train_loss, avg_train_acc, False,
+                            model, optimizer, scheduler, config, checkpoint_dir,
+                            statistics_calculator, use_contrastive, history,
+                            use_per_image_norm, best_loss, best_accuracy, best_epoch, best_phase
+                        )
 
                     if isinstance(scheduler, optim.lr_scheduler.ReduceLROnPlateau):
                         scheduler.step(avg_train_loss)
@@ -7780,15 +9139,15 @@ def deterministic_train(
             print(f"{Colors.GREEN}Phase 2 Best Loss: {phase_best_loss:.6f}{Colors.ENDC}")
         print(f"{Colors.BOLD}{'='*80}{Colors.ENDC}\n")
 
-    # Calculate epochs based on configuration and resume
+    # ================================================================
+    # CALCULATE EPOCHS
+    # ================================================================
     total_epochs = config.epochs
 
-    # Adjust if additional epochs specified
     if resume and additional_epochs:
         total_epochs = start_epoch + additional_epochs
         logger.info(f"Adjusted total epochs to {total_epochs} (original: {config.epochs})")
 
-    # Phase lengths
     if use_contrastive:
         epochs_phase1 = max(1, total_epochs // 5)
         epochs_phase2 = max(1, total_epochs - epochs_phase1)
@@ -7797,7 +9156,6 @@ def deterministic_train(
         epochs_phase1 = max(1, total_epochs // 4)
         epochs_phase2 = max(1, total_epochs - epochs_phase1)
 
-    # Adjust epochs based on resume position
     if resume:
         if start_phase == 1:
             epochs_phase1 = max(0, epochs_phase1 - start_epoch)
@@ -7819,12 +9177,10 @@ def deterministic_train(
         print(f"{Colors.GREEN}✓ Resume Mode: Starting from Phase {start_phase}, Epoch {start_epoch + 1}{Colors.ENDC}")
     print()
 
-    # Train Phase 1
     if start_phase <= 1 and epochs_phase1 > 0:
         logger.info(f"Phase 1: {epochs_phase1} epochs")
         train_phase(1, epochs_phase1, start_epoch if start_phase == 1 else 0)
 
-    # Train Phase 2
     if start_phase <= 2 and epochs_phase2 > 0:
         if config.use_kl_divergence or config.use_class_encoding or use_contrastive:
             phase2_title = "PHASE 2: VECTORIZED " + ("CONTRASTIVE LEARNING" if use_contrastive else "CLUSTERING")
@@ -7842,7 +9198,6 @@ def deterministic_train(
         print(f"{Colors.GREEN}Best Accuracy: {best_accuracy:.2%}{Colors.ENDC}")
     print(f"{Colors.GREEN}Best Epoch: {best_epoch + 1}{Colors.ENDC}")
 
-    # Ensure history is returned even if no metrics were recorded
     if not history['train_loss']:
         history['train_loss'] = [0.0]
     if not history.get('val_loss'):
@@ -7853,6 +9208,297 @@ def deterministic_train(
         history['train_acc'] = [0.0]
 
     return dict(history)
+
+def save_checkpoint(
+    epoch: int,
+    phase: int,
+    loss: float,
+    accuracy: float,
+    is_best: bool,
+    model: nn.Module,
+    optimizer: optim.Optimizer,
+    scheduler: optim.lr_scheduler._LRScheduler,
+    config: GlobalConfig,
+    checkpoint_dir: Path,
+    statistics_calculator: Optional['DatasetStatisticsCalculator'],
+    use_contrastive: bool,
+    history: Dict,
+    use_per_image_norm: bool,
+    best_loss: float,
+    best_accuracy: float,
+    best_epoch: int,
+    best_phase: int
+) -> Tuple[float, float, int, int]:
+    """
+    Save checkpoint with complete state for resume and prediction.
+    Returns updated best metrics.
+    """
+    if loss is None or (isinstance(loss, float) and (np.isnan(loss) or np.isinf(loss))):
+        logger.warning(f"Skipping checkpoint save - invalid loss: {loss}")
+        return best_loss, best_accuracy, best_epoch, best_phase
+
+    # ================================================================
+    # SAVE COMPLETE MODEL ARCHITECTURE
+    # ================================================================
+    # Extract encoder channels from model
+    encoder_channels = []
+    if hasattr(model, 'encoder_channels'):
+        encoder_channels = model.encoder_channels
+    elif hasattr(model, 'encoder_layers'):
+        for layer in model.encoder_layers:
+            if hasattr(layer, 'weight') and layer.weight is not None:
+                encoder_channels.append(layer.weight.shape[0])
+            elif hasattr(layer, '0') and hasattr(layer[0], 'weight'):
+                encoder_channels.append(layer[0].weight.shape[0])
+
+    # Get decoder channels if available
+    decoder_channels = []
+    if hasattr(model, 'decoder_layers'):
+        for layer in model.decoder_layers:
+            if hasattr(layer, 'weight') and layer.weight is not None:
+                decoder_channels.append(layer.weight.shape[0])
+            elif hasattr(layer, '0') and hasattr(layer[0], 'weight'):
+                decoder_channels.append(layer[0].weight.shape[0])
+
+    # Get flatten size
+    flattened_size = None
+    if hasattr(model, 'flattened_size'):
+        flattened_size = model.flattened_size
+    elif hasattr(model, 'final_h') and hasattr(model, 'final_w') and hasattr(model, 'encoder_channels'):
+        if model.encoder_channels:
+            flattened_size = model.encoder_channels[-1] * model.final_h * model.final_w
+
+    # Get final spatial dimensions
+    final_h, final_w = None, None
+    if hasattr(model, 'final_h') and hasattr(model, 'final_w'):
+        final_h, final_w = model.final_h, model.final_w
+
+    # Build model architecture dict
+    model_architecture = {
+        'feature_dims': config.feature_dims,
+        'compressed_dims': config.compressed_dims,
+        'in_channels': config.in_channels,
+        'num_classes': config.num_classes,
+        'input_size': list(config.input_size) if isinstance(config.input_size, tuple) else config.input_size,
+        'encoder_channels': encoder_channels,
+        'decoder_channels': decoder_channels,
+        'encoder_layers': len(model.encoder_layers) if hasattr(model, 'encoder_layers') else None,
+        'decoder_layers': len(model.decoder_layers) if hasattr(model, 'decoder_layers') else None,
+        'flattened_size': flattened_size,
+        'final_h': final_h,
+        'final_w': final_w,
+        'use_per_image_normalization': config.use_per_image_normalization,
+        'normalization_mode': config.normalization_mode,
+        'model_type': config.model_type if hasattr(config, 'model_type') else 'autoenc',
+        'complexity_score': getattr(config, 'complexity_score', 0.5),
+        'dataset_size': getattr(config, 'dataset_size', 0),
+        'use_vae': getattr(config, 'use_vae', False),
+        'use_contrastive_learning': getattr(config, 'use_contrastive_learning', False),
+        'use_enhanced_autoencoder': getattr(config, 'use_enhanced_autoencoder', True),
+        'use_hybrid_autoencoder': getattr(config, 'use_hybrid_autoencoder', True),
+        'use_advanced_hybrid': getattr(config, 'use_advanced_hybrid', True),
+        'use_detail_attention': getattr(config, 'use_detail_attention', True),
+        'use_multiscale_features': getattr(config, 'use_multiscale_features', True),
+        'use_feature_refinement': getattr(config, 'use_feature_refinement', True),
+        'force_fixed_compressed_dims': getattr(config, 'force_fixed_compressed_dims', False),
+    }
+
+    checkpoint = {
+        'epoch': epoch,
+        'phase': phase,
+        'model_state_dict': model.state_dict(),
+        'model_architecture': model_architecture,
+        'optimizer_state_dict': optimizer.state_dict(),
+        'scheduler_state_dict': scheduler.state_dict(),
+        'loss': loss if loss is not None else float('inf'),
+        'accuracy': accuracy if accuracy is not None else 0.0,
+        'best_loss': best_loss,
+        'best_accuracy': best_accuracy,
+        'best_epoch': best_epoch,
+        'best_phase': best_phase,
+        'history': dict(history),
+        'normalization_mode': config.normalization_mode,
+        'use_per_image_normalization': config.use_per_image_normalization,
+        'use_contrastive_learning': use_contrastive,
+        'clustering_mode': 'contrastive' if use_contrastive else 'enhanced',
+        'deterministic': True,
+        'feature_dims': config.feature_dims,
+        'compressed_dims': config.compressed_dims,
+        'in_channels': config.in_channels,
+        'num_classes': config.num_classes,
+        'input_size': list(config.input_size) if isinstance(config.input_size, tuple) else config.input_size,
+        'timestamp': datetime.now().isoformat(),
+        'config_version': '2.5',
+    }
+
+    # Add contrastive-specific parameters
+    if use_contrastive:
+        checkpoint['contrastive_temperature'] = config.contrastive_temperature
+        checkpoint['contrastive_weight'] = config.contrastive_weight
+        if hasattr(model, 'projection_head'):
+            checkpoint['projection_dim'] = config.contrastive_projection_dim
+        if hasattr(model, 'contrastive_temperature'):
+            checkpoint['contrastive_temperature'] = model.contrastive_temperature.item() if hasattr(model.contrastive_temperature, 'item') else config.contrastive_temperature
+
+    # Add VAE-specific parameters
+    if getattr(config, 'use_vae', False):
+        checkpoint['vae_config'] = {
+            'vae_beta': config.vae_beta if hasattr(config, 'vae_beta') else 1.0,
+            'use_kl_annealing': config.use_kl_annealing if hasattr(config, 'use_kl_annealing') else True,
+            'kl_annealing_epochs': config.kl_annealing_epochs if hasattr(config, 'kl_annealing_epochs') else 20,
+            'vae_temperature': config.vae_temperature if hasattr(config, 'vae_temperature') else 1.0,
+            'use_beta_tc': config.use_beta_tc if hasattr(config, 'use_beta_tc') else False,
+            'beta_tc_weight': config.beta_tc_weight if hasattr(config, 'beta_tc_weight') else 1.0,
+        }
+
+    # Add domain-specific config if available
+    if hasattr(config, 'domain') and config.domain != 'general':
+        checkpoint['domain'] = config.domain
+        domain_config = {}
+        for key in dir(config):
+            if not key.startswith('_') and key not in ['domain', 'dataset_name']:
+                try:
+                    value = getattr(config, key)
+                    if not callable(value) and not isinstance(value, (type, module)):
+                        domain_config[key] = value
+                except:
+                    pass
+        checkpoint['domain_config'] = domain_config
+
+    # Save dataset statistics
+    if not use_per_image_norm and statistics_calculator and statistics_calculator.is_calculated:
+        if statistics_calculator.mean is not None and statistics_calculator.std is not None:
+            checkpoint['dataset_statistics'] = {
+                'mean': statistics_calculator.mean.cpu().tolist() if hasattr(statistics_calculator.mean, 'cpu') else statistics_calculator.mean,
+                'std': statistics_calculator.std.cpu().tolist() if hasattr(statistics_calculator.std, 'cpu') else statistics_calculator.std,
+                'per_channel_min': statistics_calculator.per_channel_min.cpu().tolist() if hasattr(statistics_calculator.per_channel_min, 'cpu') and statistics_calculator.per_channel_min is not None else None,
+                'per_channel_max': statistics_calculator.per_channel_max.cpu().tolist() if hasattr(statistics_calculator.per_channel_max, 'cpu') and statistics_calculator.per_channel_max is not None else None,
+                'n_samples_used': statistics_calculator.n_samples_used,
+                'normalization_type': 'dataset_wide',
+                'mode': statistics_calculator.mode if hasattr(statistics_calculator, 'mode') else 'dataset_wide',
+                'is_calculated': statistics_calculator.is_calculated
+            }
+
+            # Save statistics file
+            dataset_name_lower = normalize_dataset_name(config.dataset_name)
+            stats_path = checkpoint_dir / f"{dataset_name_lower}_norm_stats.pt"
+            stats_dict = {
+                'mean': statistics_calculator.mean.cpu() if hasattr(statistics_calculator.mean, 'cpu') else statistics_calculator.mean,
+                'std': statistics_calculator.std.cpu() if hasattr(statistics_calculator.std, 'cpu') else statistics_calculator.std,
+                'per_channel_min': statistics_calculator.per_channel_min.cpu() if hasattr(statistics_calculator.per_channel_min, 'cpu') and statistics_calculator.per_channel_min is not None else None,
+                'per_channel_max': statistics_calculator.per_channel_max.cpu() if hasattr(statistics_calculator.per_channel_max, 'cpu') and statistics_calculator.per_channel_max is not None else None,
+                'n_samples': statistics_calculator.n_samples_used,
+                'is_fitted': True,
+                'timestamp': datetime.now().isoformat()
+            }
+            torch.save(stats_dict, stats_path)
+            logger.info(f"Normalization statistics saved to {stats_path}")
+
+    # Add optional components
+    if hasattr(model, 'classifier') and model.classifier is not None:
+        checkpoint['classifier_state_dict'] = model.classifier.state_dict()
+        classifier_arch = []
+        for layer in model.classifier:
+            if isinstance(layer, nn.Linear):
+                classifier_arch.append(('linear', layer.in_features, layer.out_features))
+            elif isinstance(layer, nn.BatchNorm1d):
+                classifier_arch.append(('batchnorm', layer.num_features))
+            elif isinstance(layer, nn.ReLU):
+                classifier_arch.append(('relu',))
+            elif isinstance(layer, nn.Dropout):
+                classifier_arch.append(('dropout', layer.p))
+        checkpoint['classifier_architecture'] = classifier_arch
+
+    if hasattr(model, 'cluster_centers') and model.cluster_centers is not None:
+        checkpoint['cluster_centers'] = model.cluster_centers.data.cpu()
+        checkpoint['cluster_count'] = len(model.cluster_centers)
+
+    if hasattr(model, '_selected_feature_indices') and model._selected_feature_indices is not None:
+        checkpoint['selected_feature_indices'] = model._selected_feature_indices.cpu()
+        checkpoint['selected_feature_count'] = len(model._selected_feature_indices)
+
+    if hasattr(model, '_is_feature_selection_frozen'):
+        checkpoint['feature_selection_frozen'] = model._is_feature_selection_frozen
+
+    # Save embedding dimensions if available
+    if hasattr(model, 'embedder') and hasattr(model.embedder, '0') and hasattr(model.embedder[0], 'weight'):
+        checkpoint['embedder_shape'] = model.embedder[0].weight.shape
+
+    if hasattr(model, 'unembedder') and hasattr(model.unembedder, '0') and hasattr(model.unembedder[0], 'weight'):
+        checkpoint['unembedder_shape'] = model.unembedder[0].weight.shape
+
+    # Save the domain processor info if available
+    if hasattr(model, '_domain_config'):
+        checkpoint['domain_config'] = model._domain_config
+
+    # ================================================================
+    # SAVE CHECKPOINT FILES
+    # ================================================================
+
+    # Save latest checkpoint
+    latest_path = checkpoint_dir / 'latest.pt'
+    torch.save(checkpoint, latest_path)
+    logger.info(f"Saved latest checkpoint (Phase {phase}, Epoch {epoch+1}, Loss: {loss:.6f})")
+
+    # Save best checkpoint if applicable
+    if is_best and accuracy is not None and accuracy > 0:
+        # Save as best.pt
+        best_path = checkpoint_dir / 'best.pt'
+        torch.save(checkpoint, best_path)
+        best_loss = loss
+        best_accuracy = accuracy
+        best_epoch = epoch
+        best_phase = phase
+        logger.info(f"✓ Best model saved - Epoch {epoch+1}, Accuracy: {accuracy:.4f} ({accuracy:.2%})")
+
+        # Save as best_model_<dataset>.pt (preferred naming for prediction)
+        dataset_name_lower = normalize_dataset_name(config.dataset_name)
+        best_model_path = checkpoint_dir / f"best_model_{dataset_name_lower}.pt"
+        torch.save(checkpoint, best_model_path)
+        logger.info(f"✓ Best model saved to {best_model_path}")
+
+        # Save as <dataset>_best.pt (backward compatibility)
+        named_best_path = checkpoint_dir / f"{dataset_name_lower}_best.pt"
+        torch.save(checkpoint, named_best_path)
+        logger.info(f"✓ Named best model saved to {named_best_path}")
+
+        # Save model architecture separately for easy inspection
+        arch_path = checkpoint_dir / f"{dataset_name_lower}_architecture.json"
+        import json
+        with open(arch_path, 'w') as f:
+            arch_copy = {}
+            for key, value in model_architecture.items():
+                if isinstance(value, (list, tuple, dict, str, int, float, bool)) or value is None:
+                    arch_copy[key] = value
+                else:
+                    arch_copy[key] = str(value)
+            json.dump(arch_copy, f, indent=2)
+        logger.info(f"Model architecture saved to {arch_path}")
+
+        # Save config file for prediction
+        conf_path = checkpoint_dir.parent / f"{dataset_name_lower}.conf"
+        try:
+            config_dict = {
+                'dataset_name': dataset_name_lower,
+                'num_classes': config.num_classes,
+                'input_size': list(config.input_size) if isinstance(config.input_size, tuple) else config.input_size,
+                'feature_dims': config.feature_dims,
+                'compressed_dims': config.compressed_dims,
+                'in_channels': config.in_channels,
+                'normalization_mode': config.normalization_mode,
+                'use_per_image_normalization': config.use_per_image_normalization,
+                'domain': getattr(config, 'domain', 'general'),
+                'model_architecture': model_architecture,
+                'timestamp': datetime.now().isoformat(),
+                'version': '2.5'
+            }
+            with open(conf_path, 'w') as f:
+                json.dump(config_dict, f, indent=2, default=str)
+            logger.info(f"Configuration saved to {conf_path}")
+        except Exception as e:
+            logger.warning(f"Could not save config file: {e}")
+
+    return best_loss, best_accuracy, best_epoch, best_phase
 
 def normalize_dataset_name(data_name: str) -> str:
     """Convert dataset name to lowercase for consistent file naming"""
@@ -14028,6 +15674,10 @@ class PerceptualLoss(nn.Module):
 
         return loss / max(len(pred_features), 1)
 
+# =============================================================================
+# UPDATED MODEL FACTORY
+# =============================================================================
+
 class ModelFactory:
     """Factory for creating appropriate model based on configuration and domain"""
 
@@ -14036,31 +15686,141 @@ class ModelFactory:
         """Create model with domain-specific enhancements and advanced architecture"""
 
         # ================================================================
-        # CHECK FOR CONTRASTIVE DIRECTIVE FIRST
+        # CHECK FOR VAE + CONTRASTIVE COMBINATION FIRST (Highest priority)
         # ================================================================
+        use_vae = getattr(config, 'use_vae', False)
         use_contrastive = getattr(config, 'use_contrastive_learning', False)
 
-        # Get basic configuration
-        input_shape = (config.in_channels, config.input_size[0], config.input_size[1])
-        feature_dims = config.feature_dims
-        compressed_dims = getattr(config, 'compressed_dims', min(64, max(8, feature_dims // 4)))
-        config.compressed_dims = compressed_dims
+        if use_vae and use_contrastive:
+            logger.info("=" * 60)
+            logger.info("🔬 VAE + CONTRASTIVE COMBINED MODE ENABLED")
+            logger.info(f"  Dataset: {config.dataset_name}")
+            logger.info(f"  Latent dimension: {config.compressed_dims}")
+            logger.info(f"  Beta (KL weight): {config.vae_beta}")
+            logger.info(f"  KL Annealing: {config.use_kl_annealing}")
+            logger.info(f"  Contrastive temperature: {config.contrastive_temperature}")
+            logger.info(f"  Contrastive weight: {config.contrastive_weight}")
+            logger.info(f"  Beta-TC: {getattr(config, 'use_beta_tc', False)}")
+            logger.info("=" * 60)
 
-        # Get configuration flags
-        use_enhanced = getattr(config, 'use_enhanced_autoencoder', True)
-        use_hybrid = getattr(config, 'use_hybrid_autoencoder', True)
-        use_advanced = getattr(config, 'use_advanced_hybrid', True)
-        use_invertible = getattr(config, 'use_invertible', False)
+            # Get domain for domain-specific combined models
+            domain = getattr(config, 'domain', 'general')
+            image_type = getattr(config, 'image_type', 'general')
 
-        # Get domain from config
-        domain = getattr(config, 'domain', 'general')
-        image_type = getattr(config, 'image_type', 'general')
-        num_classes = config.num_classes or 2
+            # Check if Beta-TCVAE is requested
+            use_beta_tc = getattr(config, 'use_beta_tc', False)
+
+            if use_beta_tc:
+                logger.info("Creating Beta-TCVAE + Contrastive (General Domain)")
+                return BetaTCVAEWithContrastive(config)
+            else:
+                logger.info("Creating VAE + Contrastive (General Domain)")
+                return VAEWithContrastive(config)
+
+            # Domain-specific combined models
+            if domain == 'astronomy' or image_type == 'astronomical':
+                if use_beta_tc:
+                    logger.info("Creating Beta-TCVAE + Contrastive for Astronomy")
+                    # For now, use combined VAE+Contrastive with Beta-TC
+                    # You could create a specialized class if needed
+                    return VAEWithContrastive(config)
+                else:
+                    logger.info("Creating VAE + Contrastive for Astronomy")
+                    return VAEWithContrastive(config)
+
+            elif domain == 'medical' or image_type == 'medical':
+                logger.info("Creating VAE + Contrastive for Medical Imaging")
+                return VAEWithContrastive(config)
+
+            elif domain == 'agriculture' or image_type == 'agricultural':
+                logger.info("Creating VAE + Contrastive for Agriculture")
+                return VAEWithContrastive(config)
+
+            else:
+                # General domain combined model
+                if use_beta_tc:
+                    logger.info("Creating Beta-TCVAE + Contrastive (General Domain)")
+                    # Could create BetaTCVAEWithContrastive if needed
+                    return VAEWithContrastive(config)
+                else:
+                    logger.info("Creating VAE + Contrastive (General Domain)")
+                    return VAEWithContrastive(config)
 
         # ================================================================
-        # CONTRASTIVE LEARNING MODELS (Highest Priority)
+        # CHECK FOR VAE DIRECTIVE (Second priority)
+        # ================================================================
+        if use_vae:
+            logger.info("=" * 60)
+            logger.info("🔬 VAE (VARIATIONAL AUTOENCODER) MODE ENABLED")
+            logger.info(f"  Dataset: {config.dataset_name}")
+            logger.info(f"  Latent dimension: {config.compressed_dims}")
+            logger.info(f"  Beta (KL weight): {config.vae_beta}")
+            logger.info(f"  KL Annealing: {config.use_kl_annealing}")
+            logger.info(f"  Beta-TC: {getattr(config, 'use_beta_tc', False)}")
+            logger.info("=" * 60)
+
+            # Get domain
+            domain = getattr(config, 'domain', 'general')
+            image_type = getattr(config, 'image_type', 'general')
+            num_classes = config.num_classes or 2
+
+            # Check if Beta-TCVAE is requested
+            use_beta_tc = getattr(config, 'use_beta_tc', False)
+
+            # ================================================================
+            # DOMAIN-SPECIFIC VAE MODELS
+            # ================================================================
+            if domain == 'astronomy' or image_type == 'astronomical':
+                if use_beta_tc:
+                    logger.info("Creating Beta-TCVAE for Astronomy (with disentanglement)")
+                    return BetaTCVAE(config)
+                else:
+                    logger.info("Creating Bayesian VAE for Astronomy")
+                    return BayesianVAE(config)
+
+            elif domain == 'medical' or image_type == 'medical':
+                if use_beta_tc:
+                    logger.info("Creating Beta-TCVAE for Medical Imaging")
+                    return BetaTCVAE(config)
+                else:
+                    logger.info("Creating Bayesian VAE for Medical Imaging")
+                    return BayesianVAE(config)
+
+            elif domain == 'agriculture' or image_type == 'agricultural':
+                if use_beta_tc:
+                    logger.info("Creating Beta-TCVAE for Agriculture")
+                    return BetaTCVAE(config)
+                else:
+                    logger.info("Creating Bayesian VAE for Agriculture")
+                    return BayesianVAE(config)
+
+            else:
+                # General domain VAE
+                if use_beta_tc:
+                    logger.info("Creating Beta-TCVAE (General Domain)")
+                    return BetaTCVAE(config)
+                else:
+                    logger.info("Creating Bayesian VAE (General Domain)")
+                    return BayesianVAE(config)
+
+        # ================================================================
+        # CHECK FOR CONTRASTIVE DIRECTIVE (Third priority)
         # ================================================================
         if use_contrastive:
+            # Get basic configuration
+            input_shape = (config.in_channels, config.input_size[0], config.input_size[1])
+            feature_dims = config.feature_dims
+            compressed_dims = getattr(config, 'compressed_dims', min(64, max(8, feature_dims // 4)))
+            config.compressed_dims = compressed_dims
+
+            # Get configuration flags
+            use_enhanced = getattr(config, 'use_enhanced_autoencoder', True)
+
+            # Get domain from config
+            domain = getattr(config, 'domain', 'general')
+            image_type = getattr(config, 'image_type', 'general')
+            num_classes = config.num_classes or 2
+
             logger.info("=" * 60)
             logger.info("🔬 CONTRASTIVE LEARNING MODE ENABLED")
             logger.info(f"  Dataset: {config.dataset_name}")
@@ -14073,10 +15833,6 @@ class ModelFactory:
             if domain == 'astronomy' or image_type == 'astronomical':
                 if use_enhanced:
                     logger.info("Creating Enhanced Astronomical Contrastive Autoencoder")
-                    # Use the existing AstronomicalStructurePreservingAutoencoder
-                    # but with contrastive learning enabled
-                    # We'll just use the standard contrastive autoencoder with
-                    # domain-specific enhancements
                     return ContrastiveAutoencoderWithProjection(config)
                 else:
                     logger.info("Creating Base Contrastive Autoencoder")
@@ -14112,14 +15868,34 @@ class ModelFactory:
                 return ContrastiveAutoencoderWithProjection(config)
 
         # ================================================================
-        # DOMAIN-SPECIFIC MODEL SELECTION (Second Priority)
+        # STANDARD MODEL SELECTION (No VAE or Contrastive)
+        # ================================================================
+
+        # Get basic configuration
+        input_shape = (config.in_channels, config.input_size[0], config.input_size[1])
+        feature_dims = config.feature_dims
+        compressed_dims = getattr(config, 'compressed_dims', min(64, max(8, feature_dims // 4)))
+        config.compressed_dims = compressed_dims
+
+        # Get configuration flags
+        use_enhanced = getattr(config, 'use_enhanced_autoencoder', True)
+        use_hybrid = getattr(config, 'use_hybrid_autoencoder', True)
+        use_advanced = getattr(config, 'use_advanced_hybrid', True)
+        use_invertible = getattr(config, 'use_invertible', False)
+
+        # Get domain from config
+        domain = getattr(config, 'domain', 'general')
+        image_type = getattr(config, 'image_type', 'general')
+        num_classes = config.num_classes or 2
+
+        # ================================================================
+        # DOMAIN-SPECIFIC MODEL SELECTION
         # ================================================================
 
         # Astronomy domain
         if domain == 'astronomy' or image_type == 'astronomical':
             if use_invertible:
                 logger.info("Creating Invertible Astronomical Structure Preserving Autoencoder")
-                # For now, use the enhanced version with invertible flag
                 return AstronomicalStructurePreservingAutoencoder(input_shape, feature_dims, config)
             elif use_enhanced:
                 logger.info("Creating Enhanced Astronomical Structure Preserving Autoencoder with Ring Detection")
@@ -14162,7 +15938,6 @@ class ModelFactory:
             logger.info(f"  Domain: {domain}")
             logger.info(f"  Classes: {num_classes}")
             logger.info("=" * 60)
-            # Use the invertible autoencoder (inlined version)
             return InvertibleAutoencoder(config)
 
         # ================================================================
@@ -14203,6 +15978,87 @@ class ModelFactory:
         else:
             logger.info(f"Creating Base Autoencoder with {feature_dims}D → {compressed_dims}D features")
             return BaseAutoencoder(config)
+
+    @staticmethod
+    def detect_model_type_from_checkpoint(checkpoint_path: str) -> Dict[str, bool]:
+        """
+        Detect the model type from a checkpoint file.
+        Useful for auto-detecting the correct flags for prediction.
+
+        Returns:
+            Dictionary with boolean flags: use_vae, use_contrastive, use_advanced, use_invertible
+        """
+        try:
+            checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
+            state_dict = checkpoint.get('model_state_dict', {})
+
+            # Check for various components
+            has_vae = any('vae_encoder' in k or 'mean_layer' in k or 'logvar_layer' in k for k in state_dict.keys())
+            has_contrastive = any('contrastive_head' in k or 'projection_head' in k for k in state_dict.keys())
+            has_advanced = any('conditional_compress' in k or 'shared_decoder' in k for k in state_dict.keys())
+            has_invertible = any('invertible' in k for k in state_dict.keys())
+            has_classifier = any('classifier' in k for k in state_dict.keys())
+            has_cluster = any('cluster_centers' in k for k in state_dict.keys())
+
+            result = {
+                'use_vae': has_vae,
+                'use_contrastive_learning': has_contrastive,
+                'use_advanced_hybrid': has_advanced,
+                'use_invertible': has_invertible,
+                'has_classifier': has_classifier,
+                'has_cluster_centers': has_cluster,
+            }
+
+            logger.info("=" * 60)
+            logger.info(f"Model type detection from checkpoint: {checkpoint_path}")
+            logger.info(f"  VAE: {result['use_vae']}")
+            logger.info(f"  Contrastive: {result['use_contrastive_learning']}")
+            logger.info(f"  Advanced Hybrid: {result['use_advanced_hybrid']}")
+            logger.info(f"  Invertible: {result['use_invertible']}")
+            logger.info(f"  Classifier: {result['has_classifier']}")
+            logger.info(f"  Cluster Centers: {result['has_cluster_centers']}")
+            logger.info("=" * 60)
+
+            return result
+
+        except Exception as e:
+            logger.error(f"Failed to detect model type from checkpoint: {e}")
+            return {
+                'use_vae': False,
+                'use_contrastive_learning': False,
+                'use_advanced_hybrid': False,
+                'use_invertible': False,
+                'has_classifier': False,
+                'has_cluster_centers': False,
+            }
+
+    @staticmethod
+    def create_model_from_checkpoint(config: GlobalConfig, checkpoint_path: str) -> nn.Module:
+        """
+        Create a model that matches the architecture of a checkpoint.
+        Automatically detects the model type and sets the appropriate flags.
+        """
+        # Detect model type from checkpoint
+        detected = ModelFactory.detect_model_type_from_checkpoint(checkpoint_path)
+
+        # Update config with detected flags
+        config.use_vae = detected['use_vae']
+        config.use_contrastive_learning = detected['use_contrastive_learning']
+        config.use_advanced_hybrid = detected['use_advanced_hybrid']
+        config.use_invertible = detected['use_invertible']
+
+        # Log what was detected
+        logger.info("=" * 60)
+        logger.info("Creating model from checkpoint detection:")
+        logger.info(f"  VAE: {detected['use_vae']}")
+        logger.info(f"  Contrastive: {detected['use_contrastive_learning']}")
+        logger.info(f"  Advanced Hybrid: {detected['use_advanced_hybrid']}")
+        logger.info(f"  Invertible: {detected['use_invertible']}")
+        logger.info("=" * 60)
+
+        # Create the appropriate model
+        return ModelFactory.create_model(config)
+
 
 # =============================================================================
 # DOMAIN-SPECIFIC ADVANCED HYBRID AUTOENCODERS (Optional Extensions)
@@ -14435,11 +16291,14 @@ def create_domain_config(args):
     # Check if user explicitly set compressed_dims
     explicit_compressed_dims = hasattr(args, 'compressed_dims') and args.compressed_dims is not None
 
+    # ================================================================
+    # BASE CONFIGURATION - All existing flags preserved
+    # ================================================================
     base_config = {
         'dataset_name': args.data_name,
         'data_type': args.data_type,
         'feature_dims': args.feature_dims,
-        'compressed_dims': args.compressed_dims if explicit_compressed_dims else 32,  # Force default 32
+        'compressed_dims': args.compressed_dims if explicit_compressed_dims else 32,
         'batch_size': args.batch_size,
         'epochs': args.epochs,
         'learning_rate': args.learning_rate,
@@ -14472,33 +16331,175 @@ def create_domain_config(args):
         'no_augmentation': getattr(args, 'no_augmentation', False),
         'augmentation_strength': getattr(args, 'augmentation_strength', 0.5),
 
-        # CRITICAL: Force fixed compressed_dims if not explicitly set by user
+        # ================================================================
+        # VAE (Variational Autoencoder) Flags - Optional Upgrade
+        # ================================================================
+        'use_vae': getattr(args, 'use_vae', False),
+        'vae_beta': getattr(args, 'vae_beta', 1.0),
+        'use_kl_annealing': getattr(args, 'use_kl_annealing', True),
+        'kl_annealing_epochs': getattr(args, 'kl_annealing_epochs', 20),
+        'vae_temperature': getattr(args, 'vae_temperature', 1.0),
+        'num_vae_samples': getattr(args, 'num_vae_samples', 10),
+        'use_beta_tc': getattr(args, 'use_beta_tc', False),
+        'beta_tc_weight': getattr(args, 'beta_tc_weight', 1.0),
+
+        # ================================================================
+        # SUPERVISED CONTRASTIVE LEARNING Flags
+        # ================================================================
+        'use_contrastive_learning': getattr(args, 'use_contrastive', False),
+        'contrastive_temperature': getattr(args, 'contrastive_temperature', 0.07),
+        'arcface_margin': getattr(args, 'arcface_margin', 0.5),
+        'contrastive_projection_dim': getattr(args, 'contrastive_projection_dim', 128),
+        'contrastive_weight': getattr(args, 'contrastive_weight', 0.7),
+
+        # ================================================================
+        # INVERTIBLE AUTOENCODER Flags
+        # ================================================================
+        'use_invertible': getattr(args, 'use_invertible', False),
+        'invertible_blocks': getattr(args, 'invertible_blocks', 4),
+        'reconstruction_weight': getattr(args, 'reconstruction_weight', 1.0),
+        'attribution_weight': getattr(args, 'attribution_weight', 0.1),
+        'invertibility_weight': getattr(args, 'invertibility_weight', 0.5),
+        'contrastive_attribution_weight': getattr(args, 'contrastive_attribution_weight', 0.3),
+
+        # ================================================================
+        # RESUME TRAINING Flags
+        # ================================================================
+        'resume': getattr(args, 'resume', False),
+        'resume_from': getattr(args, 'resume_from', None),
+        'reset_optimizer': getattr(args, 'reset_optimizer', False),
+        'additional_epochs': getattr(args, 'additional_epochs', None),
+
+        # ================================================================
+        # FORCE FIXED COMPRESSED DIMS
+        # ================================================================
         'force_fixed_compressed_dims': not explicit_compressed_dims,
     }
 
-
-    # Handle input size
+    # ================================================================
+    # HANDLE INPUT SIZE
+    # ================================================================
     if hasattr(args, 'input_size') and args.input_size is not None:
         base_config['input_size'] = tuple(args.input_size)
         base_config['input_size_explicitly_set'] = True
     else:
         base_config['input_size_explicitly_set'] = False
 
-    # Domain-specific configurations
+    # ================================================================
+    # DOMAIN-SPECIFIC CONFIGURATIONS
+    # ================================================================
     if args.domain == 'agriculture':
-        return AgricultureConfig(**base_config, has_nir_band=args.has_nir_band)
+        return AgricultureConfig(
+            **base_config,
+            has_nir_band=args.has_nir_band,
+            nir_band_index=getattr(args, 'nir_band_index', 3),
+            detect_chlorophyll=getattr(args, 'detect_chlorophyll', True),
+            detect_water_stress=getattr(args, 'detect_water_stress', True),
+            detect_nutrient_deficiency=getattr(args, 'detect_nutrient_deficiency', True),
+            detect_leaf_disease=getattr(args, 'detect_leaf_disease', True),
+            detect_fruit_disease=getattr(args, 'detect_fruit_disease', True),
+            detect_pest_damage=getattr(args, 'detect_pest_damage', True),
+            compute_ndvi=getattr(args, 'compute_ndvi', True),
+            compute_evi=getattr(args, 'compute_evi', True),
+            compute_ndwi=getattr(args, 'compute_ndwi', True),
+            compute_gci=getattr(args, 'compute_gci', True),
+            compute_leaf_texture=getattr(args, 'compute_leaf_texture', True),
+            compute_canopy_structure=getattr(args, 'compute_canopy_structure', True),
+            estimate_growth_stage=getattr(args, 'estimate_growth_stage', True),
+            compute_biomass=getattr(args, 'compute_biomass', True)
+        )
+
     elif args.domain == 'medical':
-        return MedicalConfig(**base_config, modality=args.modality)
+        return MedicalConfig(
+            **base_config,
+            modality=args.modality,
+            detect_tumor=getattr(args, 'detect_tumor', True),
+            detect_lesion=getattr(args, 'detect_lesion', True),
+            detect_hemorrhage=getattr(args, 'detect_hemorrhage', True),
+            detect_calcification=getattr(args, 'detect_calcification', True),
+            segment_organs=getattr(args, 'segment_organs', True),
+            segment_vessels=getattr(args, 'segment_vessels', True),
+            segment_tissues=getattr(args, 'segment_tissues', True),
+            compute_tissue_texture=getattr(args, 'compute_tissue_texture', True),
+            compute_boundary_regularity=getattr(args, 'compute_boundary_regularity', True),
+            compute_contrast=getattr(args, 'compute_contrast', True),
+            compute_sharpness=getattr(args, 'compute_sharpness', True),
+            detect_artifacts=getattr(args, 'detect_artifacts', True),
+            estimate_tumor_size=getattr(args, 'estimate_tumor_size', True),
+            compute_tumor_heterogeneity=getattr(args, 'compute_tumor_heterogeneity', True)
+        )
+
     elif args.domain == 'satellite':
-        return SatelliteConfig(**base_config, satellite_type=args.satellite_type)
+        return SatelliteConfig(
+            **base_config,
+            satellite_type=args.satellite_type,
+            num_bands=getattr(args, 'num_bands', 4),
+            classify_land_cover=getattr(args, 'classify_land_cover', True),
+            detect_urban_area=getattr(args, 'detect_urban_area', True),
+            detect_forest_cover=getattr(args, 'detect_forest_cover', True),
+            detect_water_body=getattr(args, 'detect_water_body', True),
+            detect_agriculture=getattr(args, 'detect_agriculture', True),
+            detect_change=getattr(args, 'detect_change', True),
+            detect_deforestation=getattr(args, 'detect_deforestation', True),
+            detect_urban_sprawl=getattr(args, 'detect_urban_sprawl', True),
+            compute_ndvi=getattr(args, 'compute_ndvi', True),
+            compute_ndwi=getattr(args, 'compute_ndwi', True),
+            compute_ndbi=getattr(args, 'compute_ndbi', True),
+            compute_mndwi=getattr(args, 'compute_mndwi', True),
+            compute_glcm=getattr(args, 'compute_glcm', True),
+            compute_pansharpening=getattr(args, 'compute_pansharpening', True)
+        )
+
     elif args.domain == 'surveillance':
-        return SurveillanceConfig(**base_config, detect_motion=args.detect_motion,
-                                 enhance_low_light=args.enhance_low_light)
+        return SurveillanceConfig(
+            **base_config,
+            detect_person=getattr(args, 'detect_person', True),
+            detect_vehicle=getattr(args, 'detect_vehicle', True),
+            detect_animal=getattr(args, 'detect_animal', True),
+            detect_face=getattr(args, 'detect_face', True),
+            detect_motion=args.detect_motion,
+            detect_anomaly=getattr(args, 'detect_anomaly', True),
+            track_objects=getattr(args, 'track_objects', True),
+            classify_scene_type=getattr(args, 'classify_scene_type', True),
+            estimate_crowd_density=getattr(args, 'estimate_crowd_density', True),
+            enhance_low_light=args.enhance_low_light,
+            reduce_noise=getattr(args, 'reduce_noise', True),
+            dehaze=getattr(args, 'dehaze', True),
+            super_resolution=getattr(args, 'super_resolution', True),
+            blur_faces=getattr(args, 'blur_faces', False),
+            anonymize=getattr(args, 'anonymize', False)
+        )
+
     elif args.domain == 'microscopy':
-        return MicroscopyConfig(**base_config, microscopy_type=args.microscopy_type)
+        return MicroscopyConfig(
+            **base_config,
+            microscopy_type=args.microscopy_type,
+            detect_cells=getattr(args, 'detect_cells', True),
+            count_cells=getattr(args, 'count_cells', True),
+            segment_nucleus=getattr(args, 'segment_nucleus', True),
+            detect_mitosis=getattr(args, 'detect_mitosis', True),
+            detect_mitochondria=getattr(args, 'detect_mitochondria', True),
+            detect_nucleoli=getattr(args, 'detect_nucleoli', True),
+            detect_fluorescent_signal=getattr(args, 'detect_fluorescent_signal', True),
+            compute_intensity_distribution=getattr(args, 'compute_intensity_distribution', True),
+            compute_resolution=getattr(args, 'compute_resolution', True),
+            detect_out_of_focus=getattr(args, 'detect_out_of_focus', True)
+        )
+
     elif args.domain == 'industrial':
-        return IndustrialConfig(**base_config, detect_crack=args.detect_crack,
-                               detect_corrosion=args.detect_corrosion)
+        return IndustrialConfig(
+            **base_config,
+            detect_crack=args.detect_crack,
+            detect_corrosion=args.detect_corrosion,
+            detect_dent=getattr(args, 'detect_dent', True),
+            detect_scratch=getattr(args, 'detect_scratch', True),
+            measure_dimensions=getattr(args, 'measure_dimensions', True),
+            detect_misalignment=getattr(args, 'detect_misalignment', True),
+            classify_defect_type=getattr(args, 'classify_defect_type', True),
+            compute_surface_roughness=getattr(args, 'compute_surface_roughness', True),
+            detect_uniformity=getattr(args, 'detect_uniformity', True)
+        )
+
     elif args.domain == 'astronomy':
         astro_args = {
             'use_fits': getattr(args, 'use_fits', True),
@@ -14509,9 +16510,18 @@ def create_domain_config(args):
             'detection_threshold': getattr(args, 'detection_threshold', 2.5),
             'pixel_scale': getattr(args, 'pixel_scale', 1.0),
             'gain': getattr(args, 'gain', 1.0),
-            'read_noise': getattr(args, 'read_noise', 0.0)
+            'read_noise': getattr(args, 'read_noise', 0.0),
+            'estimate_psf': getattr(args, 'estimate_psf', True),
+            'morphological_features': getattr(args, 'morphological_features', True),
+            'photometric_features': getattr(args, 'photometric_features', True),
+            'shape_features': getattr(args, 'shape_features', True),
+            'compute_snr': getattr(args, 'compute_snr', True),
+            'compute_ellipticity': getattr(args, 'compute_ellipticity', True),
+            'compute_concentration': getattr(args, 'compute_concentration', True),
+            'compute_asymmetry': getattr(args, 'compute_asymmetry', True)
         }
         return AstronomyConfig(**base_config, **astro_args)
+
     else:
         return GlobalConfig(**base_config)
 
@@ -14523,11 +16533,13 @@ def create_domain_config(args):
 def parse_args():
     parser = argparse.ArgumentParser(description='CDBNN - Convolutional Deep Bayesian Neural Network')
 
-    # Basic arguments
+    # ================================================================
+    # BASIC ARGUMENTS
+    # ================================================================
     parser.add_argument('--interactive', '-i', action='store_true', help='Run in interactive mode')
     parser.add_argument('--verify', '-v', action='store_true', help='Run verification tests')
     parser.add_argument('--mode', type=str, choices=['train', 'predict', 'extract', 'resume'],
-                           help='Operation mode (train, predict, extract, or resume)')
+                       help='Operation mode (train, predict, extract, or resume)')
     parser.add_argument('--data_name', type=str, help='Dataset name')
     parser.add_argument('--data_type', type=str, choices=['custom', 'torchvision'], default='custom')
     parser.add_argument('--data_path', type=str, default=None, help='Path to data')
@@ -14535,12 +16547,17 @@ def parse_args():
                        choices=['general', 'agriculture', 'medical', 'satellite',
                                'surveillance', 'microscopy', 'industrial', 'astronomy'],
                        default='general', help='Domain for specialized processing')
-
-    # Normalization strategy
+    parser.add_argument('--model_path', type=str, default=None,
+                       help='Path to the trained model checkpoint file')
+    # ================================================================
+    # NORMALIZATION STRATEGY
+    # ================================================================
     parser.add_argument('--per_image_norm', action='store_true',
                        help='Use per-image Z-score normalization')
 
-    # Advanced architecture options
+    # ================================================================
+    # ADVANCED ARCHITECTURE OPTIONS
+    # ================================================================
     parser.add_argument('--use_enhanced', action='store_true', default=True,
                        help='Use enhanced autoencoder features')
     parser.add_argument('--use_hybrid', action='store_true', default=True,
@@ -14553,7 +16570,9 @@ def parse_args():
                        choices=['contrastive', 'relational', 'mse'], default='contrastive',
                        help='Knowledge distillation mode')
 
-    # Domain enhancement options
+    # ================================================================
+    # DOMAIN ENHANCEMENT OPTIONS
+    # ================================================================
     parser.add_argument('--use_detail_attention', action='store_true', default=True,
                        help='Use detail attention module')
     parser.add_argument('--use_multiscale_features', action='store_true', default=True,
@@ -14561,63 +16580,249 @@ def parse_args():
     parser.add_argument('--use_feature_refinement', action='store_true', default=True,
                        help='Use feature refinement')
 
-    # Training options
+    # ================================================================
+    # TRAINING OPTIONS
+    # ================================================================
     parser.add_argument('--no_augmentation', action='store_true',
                        help='Disable data augmentation')
     parser.add_argument('--augmentation_strength', type=float, default=0.5,
                        help='Strength of data augmentations (0.0 to 1.0)')
 
-    # Model hyperparameters
-    parser.add_argument('--feature_dims', type=int, default=128)
-    parser.add_argument('--compressed_dims', type=int, default=32)
-    parser.add_argument('--batch_size', type=int, default=32)
-    parser.add_argument('--epochs', type=int, default=200)
-    parser.add_argument('--learning_rate', type=float, default=0.001)
-    parser.add_argument('--workers', type=int, default=0)
-    parser.add_argument('--max_features', type=int, default=32)
+    # ================================================================
+    # MODEL HYPERPARAMETERS
+    # ================================================================
+    parser.add_argument('--feature_dims', type=int, default=128,
+                       help='Feature dimension size')
+    parser.add_argument('--compressed_dims', type=int, default=32,
+                       help='Compressed/latent dimension size')
+    parser.add_argument('--batch_size', type=int, default=32,
+                       help='Batch size for training')
+    parser.add_argument('--epochs', type=int, default=200,
+                       help='Number of training epochs')
+    parser.add_argument('--learning_rate', type=float, default=0.001,
+                       help='Learning rate')
+    parser.add_argument('--workers', type=int, default=0,
+                       help='Number of data loading workers')
+    parser.add_argument('--max_features', type=int, default=32,
+                       help='Maximum number of features to select')
 
-    # Training options
-    parser.add_argument('--cpu', action='store_true')
-    parser.add_argument('--no_mixed_precision', action='store_true')
-    parser.add_argument('--generate_heatmaps', action='store_true', default=True)
-    parser.add_argument('--generate_tsne', action='store_true', default=True)
-    parser.add_argument('--disable_kl', action='store_true')
-    parser.add_argument('--disable_class', action='store_true')
-    parser.add_argument('--disable_distance_corr', action='store_true')
-    parser.add_argument('--output_dir', type=str, default='data')
+    # ================================================================
+    # TRAINING OPTIONS
+    # ================================================================
+    parser.add_argument('--cpu', action='store_true',
+                       help='Force CPU training even if GPU is available')
+    parser.add_argument('--no_mixed_precision', action='store_true',
+                       help='Disable mixed precision training')
+    parser.add_argument('--generate_heatmaps', action='store_true', default=True,
+                       help='Generate attention heatmaps')
+    parser.add_argument('--generate_tsne', action='store_true', default=True,
+                       help='Generate t-SNE visualization')
+    parser.add_argument('--disable_kl', action='store_true',
+                       help='Disable KL divergence loss')
+    parser.add_argument('--disable_class', action='store_true',
+                       help='Disable class encoding')
+    parser.add_argument('--disable_distance_corr', action='store_true',
+                       help='Disable distance correlation feature selection')
+    parser.add_argument('--output_dir', type=str, default='data',
+                       help='Output directory for results')
 
-    # Input size
+    # ================================================================
+    # INPUT SIZE
+    # ================================================================
     parser.add_argument('--input_size', type=int, nargs=2, metavar=('H', 'W'),
                        help='Input image size (height width)')
 
-    # Architecture optimization
-    parser.add_argument('--auto_optimize', action='store_true', default=True)
-    parser.add_argument('--no_auto_optimize', action='store_true')
+    # ================================================================
+    # ARCHITECTURE OPTIMIZATION
+    # ================================================================
+    parser.add_argument('--auto_optimize', action='store_true', default=True,
+                       help='Auto-optimize architecture based on dataset')
+    parser.add_argument('--no_auto_optimize', action='store_true',
+                       help='Disable auto-optimization')
 
-    # Domain-specific flags
-    parser.add_argument('--has_nir_band', action='store_true', help='Has near-infrared band (agriculture)')
-    parser.add_argument('--modality', type=str, default='general', help='Medical imaging modality')
-    parser.add_argument('--satellite_type', type=str, default='general', help='Satellite type')
-    parser.add_argument('--detect_motion', action='store_true', help='Detect motion (surveillance)')
-    parser.add_argument('--enhance_low_light', action='store_true', help='Enhance low-light (surveillance)')
-    parser.add_argument('--microscopy_type', type=str, default='general', help='Microscopy type')
-    parser.add_argument('--detect_crack', action='store_true', help='Detect cracks (industrial)')
-    parser.add_argument('--detect_corrosion', action='store_true', help='Detect corrosion (industrial)')
+    # ================================================================
+    # DOMAIN-SPECIFIC FLAGS
+    # ================================================================
+    # Agriculture
+    parser.add_argument('--has_nir_band', action='store_true',
+                       help='Has near-infrared band (agriculture)')
+    parser.add_argument('--nir_band_index', type=int, default=3,
+                       help='NIR band index (agriculture)')
+    parser.add_argument('--detect_chlorophyll', action='store_true', default=True,
+                       help='Detect chlorophyll content (agriculture)')
+    parser.add_argument('--detect_water_stress', action='store_true', default=True,
+                       help='Detect water stress (agriculture)')
+    parser.add_argument('--detect_nutrient_deficiency', action='store_true', default=True,
+                       help='Detect nutrient deficiency (agriculture)')
+    parser.add_argument('--detect_leaf_disease', action='store_true', default=True,
+                       help='Detect leaf diseases (agriculture)')
+    parser.add_argument('--detect_fruit_disease', action='store_true', default=True,
+                       help='Detect fruit diseases (agriculture)')
+    parser.add_argument('--detect_pest_damage', action='store_true', default=True,
+                       help='Detect pest damage (agriculture)')
+    parser.add_argument('--compute_ndvi', action='store_true', default=True,
+                       help='Compute NDVI index (agriculture)')
+    parser.add_argument('--compute_evi', action='store_true', default=True,
+                       help='Compute EVI index (agriculture)')
+    parser.add_argument('--compute_ndwi', action='store_true', default=True,
+                       help='Compute NDWI index (agriculture)')
+    parser.add_argument('--compute_gci', action='store_true', default=True,
+                       help='Compute GCI index (agriculture)')
 
-    # Astronomy-specific flags
-    parser.add_argument('--use_fits', action='store_true', help='Enable FITS support')
-    parser.add_argument('--fits_hdu', type=int, default=0, help='FITS HDU to read')
+    # Medical
+    parser.add_argument('--modality', type=str, default='general',
+                       help='Medical imaging modality (ct, mri, xray, ultrasound, histology)')
+    parser.add_argument('--detect_tumor', action='store_true', default=True,
+                       help='Detect tumors (medical)')
+    parser.add_argument('--detect_lesion', action='store_true', default=True,
+                       help='Detect lesions (medical)')
+    parser.add_argument('--detect_hemorrhage', action='store_true', default=True,
+                       help='Detect hemorrhage (medical)')
+    parser.add_argument('--detect_calcification', action='store_true', default=True,
+                       help='Detect calcification (medical)')
+    parser.add_argument('--segment_organs', action='store_true', default=True,
+                       help='Segment organs (medical)')
+    parser.add_argument('--segment_vessels', action='store_true', default=True,
+                       help='Segment blood vessels (medical)')
+    parser.add_argument('--segment_tissues', action='store_true', default=True,
+                       help='Segment tissues (medical)')
+
+    # Satellite
+    parser.add_argument('--satellite_type', type=str, default='general',
+                       help='Satellite type (sentinel, landsat, modis)')
+    parser.add_argument('--num_bands', type=int, default=4,
+                       help='Number of spectral bands (satellite)')
+    parser.add_argument('--classify_land_cover', action='store_true', default=True,
+                       help='Classify land cover (satellite)')
+    parser.add_argument('--detect_urban_area', action='store_true', default=True,
+                       help='Detect urban areas (satellite)')
+    parser.add_argument('--detect_forest_cover', action='store_true', default=True,
+                       help='Detect forest cover (satellite)')
+    parser.add_argument('--detect_water_body', action='store_true', default=True,
+                       help='Detect water bodies (satellite)')
+    parser.add_argument('--detect_agriculture', action='store_true', default=True,
+                       help='Detect agricultural areas (satellite)')
+    parser.add_argument('--detect_change', action='store_true', default=True,
+                       help='Detect changes (satellite)')
+    parser.add_argument('--detect_deforestation', action='store_true', default=True,
+                       help='Detect deforestation (satellite)')
+    parser.add_argument('--detect_urban_sprawl', action='store_true', default=True,
+                       help='Detect urban sprawl (satellite)')
+
+    # Surveillance
+    parser.add_argument('--detect_motion', action='store_true',
+                       help='Detect motion (surveillance)')
+    parser.add_argument('--enhance_low_light', action='store_true',
+                       help='Enhance low-light images (surveillance)')
+    parser.add_argument('--detect_person', action='store_true', default=True,
+                       help='Detect persons (surveillance)')
+    parser.add_argument('--detect_vehicle', action='store_true', default=True,
+                       help='Detect vehicles (surveillance)')
+    parser.add_argument('--detect_animal', action='store_true', default=True,
+                       help='Detect animals (surveillance)')
+    parser.add_argument('--detect_face', action='store_true', default=True,
+                       help='Detect faces (surveillance)')
+    parser.add_argument('--detect_anomaly', action='store_true', default=True,
+                       help='Detect anomalies (surveillance)')
+    parser.add_argument('--track_objects', action='store_true', default=True,
+                       help='Track objects (surveillance)')
+    parser.add_argument('--reduce_noise', action='store_true', default=True,
+                       help='Reduce noise (surveillance)')
+    parser.add_argument('--dehaze', action='store_true', default=True,
+                       help='Dehaze images (surveillance)')
+    parser.add_argument('--super_resolution', action='store_true', default=True,
+                       help='Super-resolution (surveillance)')
+    parser.add_argument('--blur_faces', action='store_true',
+                       help='Blur faces for privacy (surveillance)')
+    parser.add_argument('--anonymize', action='store_true',
+                       help='Anonymize images (surveillance)')
+
+    # Microscopy
+    parser.add_argument('--microscopy_type', type=str, default='general',
+                       help='Microscopy type (fluorescence, phase_contrast, electron)')
+    parser.add_argument('--detect_cells', action='store_true', default=True,
+                       help='Detect cells (microscopy)')
+    parser.add_argument('--count_cells', action='store_true', default=True,
+                       help='Count cells (microscopy)')
+    parser.add_argument('--segment_nucleus', action='store_true', default=True,
+                       help='Segment nuclei (microscopy)')
+    parser.add_argument('--detect_mitosis', action='store_true', default=True,
+                       help='Detect mitosis (microscopy)')
+    parser.add_argument('--detect_mitochondria', action='store_true', default=True,
+                       help='Detect mitochondria (microscopy)')
+    parser.add_argument('--detect_nucleoli', action='store_true', default=True,
+                       help='Detect nucleoli (microscopy)')
+    parser.add_argument('--detect_fluorescent_signal', action='store_true', default=True,
+                       help='Detect fluorescent signals (microscopy)')
+    parser.add_argument('--compute_resolution', action='store_true', default=True,
+                       help='Compute resolution (microscopy)')
+    parser.add_argument('--detect_out_of_focus', action='store_true', default=True,
+                       help='Detect out-of-focus images (microscopy)')
+
+    # Industrial
+    parser.add_argument('--detect_crack', action='store_true',
+                       help='Detect cracks (industrial)')
+    parser.add_argument('--detect_corrosion', action='store_true',
+                       help='Detect corrosion (industrial)')
+    parser.add_argument('--detect_dent', action='store_true', default=True,
+                       help='Detect dents (industrial)')
+    parser.add_argument('--detect_scratch', action='store_true', default=True,
+                       help='Detect scratches (industrial)')
+    parser.add_argument('--measure_dimensions', action='store_true', default=True,
+                       help='Measure object dimensions (industrial)')
+    parser.add_argument('--detect_misalignment', action='store_true', default=True,
+                       help='Detect misalignment (industrial)')
+    parser.add_argument('--classify_defect_type', action='store_true', default=True,
+                       help='Classify defect type (industrial)')
+    parser.add_argument('--compute_surface_roughness', action='store_true', default=True,
+                       help='Compute surface roughness (industrial)')
+    parser.add_argument('--detect_uniformity', action='store_true', default=True,
+                       help='Detect surface uniformity (industrial)')
+
+    # ================================================================
+    # ASTRONOMY-SPECIFIC FLAGS
+    # ================================================================
+    parser.add_argument('--use_fits', action='store_true', default=True,
+                       help='Enable FITS support (astronomy)')
+    parser.add_argument('--fits_hdu', type=int, default=0,
+                       help='FITS HDU to read (astronomy)')
     parser.add_argument('--fits_normalization', type=str,
-                       choices=['zscale', 'percent', 'minmax', 'asinh'], default='zscale')
-    parser.add_argument('--subtract_background', action='store_true', default=True)
-    parser.add_argument('--detect_sources', action='store_true', default=True)
-    parser.add_argument('--detection_threshold', type=float, default=2.5)
-    parser.add_argument('--pixel_scale', type=float, default=1.0)
-    parser.add_argument('--gain', type=float, default=1.0)
-    parser.add_argument('--read_noise', type=float, default=0.0)
+                       choices=['zscale', 'percent', 'minmax', 'asinh'], default='zscale',
+                       help='FITS image normalization method (astronomy)')
+    parser.add_argument('--subtract_background', action='store_true', default=True,
+                       help='Subtract background (astronomy)')
+    parser.add_argument('--detect_sources', action='store_true', default=True,
+                       help='Detect astronomical sources (astronomy)')
+    parser.add_argument('--detection_threshold', type=float, default=2.5,
+                       help='Source detection threshold (astronomy)')
+    parser.add_argument('--pixel_scale', type=float, default=1.0,
+                       help='Pixel scale in arcsec/pixel (astronomy)')
+    parser.add_argument('--gain', type=float, default=1.0,
+                       help='Detector gain (astronomy)')
+    parser.add_argument('--read_noise', type=float, default=0.0,
+                       help='Read noise (astronomy)')
+    parser.add_argument('--estimate_psf', action='store_true', default=True,
+                       help='Estimate PSF (astronomy)')
+    parser.add_argument('--morphological_features', action='store_true', default=True,
+                       help='Extract morphological features (astronomy)')
+    parser.add_argument('--photometric_features', action='store_true', default=True,
+                       help='Extract photometric features (astronomy)')
+    parser.add_argument('--shape_features', action='store_true', default=True,
+                       help='Extract shape features (astronomy)')
+    parser.add_argument('--compute_snr', action='store_true', default=True,
+                       help='Compute signal-to-noise ratio (astronomy)')
+    parser.add_argument('--compute_ellipticity', action='store_true', default=True,
+                       help='Compute ellipticity (astronomy)')
+    parser.add_argument('--compute_concentration', action='store_true', default=True,
+                       help='Compute concentration index (astronomy)')
+    parser.add_argument('--compute_asymmetry', action='store_true', default=True,
+                       help='Compute asymmetry index (astronomy)')
 
-    # Resume training arguments
-    parser.add_argument('--resume', action='store_true', help='Resume training from last checkpoint')
+    # ================================================================
+    # RESUME TRAINING ARGUMENTS
+    # ================================================================
+    parser.add_argument('--resume', action='store_true',
+                       help='Resume training from last checkpoint')
     parser.add_argument('--resume_from', type=str, default=None,
                        help='Path to specific checkpoint file to resume from')
     parser.add_argument('--reset_optimizer', action='store_true',
@@ -14625,8 +16830,28 @@ def parse_args():
     parser.add_argument('--additional_epochs', type=int, default=None,
                        help='Add additional epochs to original training (overrides original epochs)')
 
-   # ================================================================
-    # SUPERVISED CONTRASTIVE LEARNING DIRECTIVE
+    # ================================================================
+    # VAE (VARIATIONAL AUTOENCODER) ARGUMENTS - OPTIONAL UPGRADE
+    # ================================================================
+    parser.add_argument('--use_vae', action='store_true',
+                       help='Use Variational Autoencoder (VAE) instead of standard AE')
+    parser.add_argument('--vae_beta', type=float, default=1.0,
+                       help='Beta weight for KL divergence in VAE (default: 1.0)')
+    parser.add_argument('--use_kl_annealing', action='store_true', default=True,
+                       help='Gradually increase KL weight during training')
+    parser.add_argument('--kl_annealing_epochs', type=int, default=20,
+                       help='Number of epochs to anneal KL weight (default: 20)')
+    parser.add_argument('--vae_temperature', type=float, default=1.0,
+                       help='Temperature for VAE sampling (default: 1.0)')
+    parser.add_argument('--num_vae_samples', type=int, default=10,
+                       help='Number of samples for uncertainty estimation (default: 10)')
+    parser.add_argument('--use_beta_tc', action='store_true',
+                       help='Use Beta-TCVAE for better disentanglement')
+    parser.add_argument('--beta_tc_weight', type=float, default=1.0,
+                       help='Beta-TC weight for total correlation (default: 1.0)')
+
+    # ================================================================
+    # SUPERVISED CONTRASTIVE LEARNING ARGUMENTS
     # ================================================================
     parser.add_argument('--use_contrastive', action='store_true',
                        help='Use Supervised Contrastive Learning instead of clustering')
@@ -14638,6 +16863,26 @@ def parse_args():
                        help='Projection dimension for contrastive head (default: 128)')
     parser.add_argument('--contrastive_weight', type=float, default=0.7,
                        help='Weight for contrastive loss (default: 0.7)')
+
+    # ================================================================
+    # INVERTIBLE AUTOENCODER ARGUMENTS
+    # ================================================================
+    parser.add_argument('--use_invertible', action='store_true',
+                       help='Use invertible autoencoder for interpretability')
+    parser.add_argument('--invertible_blocks', type=int, default=4,
+                       help='Number of invertible blocks (default: 4)')
+    parser.add_argument('--reconstruction_weight', type=float, default=1.0,
+                       help='Weight for reconstruction loss (default: 1.0)')
+    parser.add_argument('--attribution_weight', type=float, default=0.1,
+                       help='Weight for attribution consistency loss (default: 0.1)')
+    parser.add_argument('--invertibility_weight', type=float, default=0.5,
+                       help='Weight for invertibility loss (default: 0.5)')
+    parser.add_argument('--contrastive_attribution_weight', type=float, default=0.3,
+                       help='Weight for contrastive attribution loss (default: 0.3)')
+    parser.add_argument('--explain_predictions', action='store_true',
+                       help='Generate explanations for predictions')
+    parser.add_argument('--attribution_threshold', type=float, default=0.5,
+                       help='Threshold for important regions (default: 0.5)')
 
     return parser.parse_args()
 
@@ -15849,11 +18094,50 @@ def main():
             prediction_config.model_loading_dir = str(model_checkpoint_dir)
             prediction_config.data_dir_for_loading = str(model_data_dir)
 
-            predictor = PredictionManager(prediction_config, model_load_dir=str(model_checkpoint_dir))
+            # Get model_path from args if provided
+            model_path = getattr(args, 'model_path', None)
+            if model_path:
+                # Make sure it's a Path object
+                model_path = Path(model_path)
+                if not model_path.is_absolute():
+                    # If relative, resolve relative to current working directory
+                    model_path = Path.cwd() / model_path
+                logger.info(f"Using specified model: {model_path}")
+            else:
+                # Auto-discover: look for best_model_<data_name>.pt
+                default_model_path = model_checkpoint_dir / f"best_model_{args.data_name}.pt"
+                if default_model_path.exists():
+                    model_path = default_model_path
+                    logger.info(f"Auto-discovered model: {model_path}")
+                else:
+                    # Try alternative naming
+                    alt_model_path = model_checkpoint_dir / f"{args.data_name}_best.pt"
+                    if alt_model_path.exists():
+                        model_path = alt_model_path
+                        logger.info(f"Auto-discovered model: {model_path}")
+                    else:
+                        # Try best.pt
+                        best_model_path = model_checkpoint_dir / 'best.pt'
+                        if best_model_path.exists():
+                            model_path = best_model_path
+                            logger.info(f"Auto-discovered model: {model_path}")
+                        else:
+                            logger.warning(f"No model found in {model_checkpoint_dir}")
+                            logger.warning(f"Expected: best_model_{args.data_name}.pt or {args.data_name}_best.pt")
+                            model_path = None
+
+            # Create predictor with model_path
+            predictor = PredictionManager(
+                prediction_config,
+                model_load_dir=str(model_checkpoint_dir),
+                model_path=str(model_path) if model_path else None
+            )
 
             output_csv = str(output_data_dir / f"{args.data_name}.csv")
 
             logger.info(f"Model loading from: {model_checkpoint_dir}")
+            if model_path:
+                logger.info(f"Using model: {model_path}")
             logger.info(f"Output directory: {output_data_dir}")
             logger.info(f"Output CSV: {output_csv}")
 
@@ -15991,5 +18275,22 @@ python cdbnn.py --mode resume --data_name galaxy --additional_epochs 50 --epochs
 
 # Using the --resume flag with train mode
 python cdbnn.py --mode train --data_name galaxy --resume
+
+--------------------------------------------------------------------------------------------------
+
+# 1. Standard Autoencoder (Default)
+python cdbnn.py --mode train --data_name cifar100 --data_type torchvision
+
+# 2. VAE (Optional upgrade)
+python cdbnn.py --mode train --data_name cifar100 --data_type torchvision --use_vae
+
+# 3. Beta-TCVAE (Better disentanglement)
+python cdbnn.py --mode train --data_name cifar100 --data_type torchvision --use_vae --use_beta_tc
+
+# 4. VAE + Contrastive (Combined)
+python cdbnn.py --mode train --data_name cifar100 --data_type torchvision --use_vae --use_contrastive
+
+# 5. Domain-specific VAE
+python cdbnn.py --mode train --data_name galaxy --data_type custom --data_path Images/Galaxy/ --domain astronomy --use_vae
 ===================================================================================================""")
     sys.exit(main())
