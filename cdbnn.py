@@ -175,7 +175,7 @@ class GlobalConfig:
     dataset_size: int = 0
 
     # ========================================================================
-    # NEW: Advanced model configuration flags
+    # Advanced model configuration flags
     # ========================================================================
     use_enhanced_autoencoder: bool = True      # Use enhanced base autoencoder
     use_hybrid_autoencoder: bool = True        # Use hybrid (conditional + unconditional)
@@ -194,7 +194,7 @@ class GlobalConfig:
     augmentation_strength: float = 0.5         # Strength of augmentations
 
     # ========================================================================
-    # NEW: VAE (Variational Autoencoder) Flags - Optional Upgrade
+    # VAE (Variational Autoencoder) Flags - Optional Upgrade
     # ========================================================================
     use_vae: bool = False                      # Enable VAE mode
     vae_beta: float = 1.0                      # KL divergence weight (β-VAE)
@@ -206,7 +206,7 @@ class GlobalConfig:
     beta_tc_weight: float = 1.0                # Beta-TC weight
 
     # ========================================================================
-    # NEW: Supervised Contrastive Learning Flags
+    # Supervised Contrastive Learning Flags
     # ========================================================================
     use_contrastive_learning: bool = False     # Enable contrastive learning
     contrastive_temperature: float = 0.07      # Temperature for contrastive loss
@@ -215,7 +215,7 @@ class GlobalConfig:
     contrastive_weight: float = 0.7            # Weight for contrastive loss
 
     # ========================================================================
-    # NEW: Invertible Autoencoder Flags
+    # Invertible Autoencoder Flags
     # ========================================================================
     use_invertible: bool = False               # Use invertible autoencoder
     invertible_blocks: int = 4                 # Number of invertible blocks
@@ -225,31 +225,267 @@ class GlobalConfig:
     contrastive_attribution_weight: float = 0.3  # Weight for contrastive attribution loss
 
     # ========================================================================
-    # NEW: Resume Training Flags
+    # Resume Training Flags
     # ========================================================================
     resume: bool = False                       # Resume training from checkpoint
     resume_from: Optional[str] = None          # Path to checkpoint file
     reset_optimizer: bool = False              # Reset optimizer state
     additional_epochs: Optional[int] = None    # Additional epochs to add
 
+    # ========================================================================
+    # PREDICTION/FORCED ARCHITECTURE FLAGS - CRITICAL FOR MODEL LOADING
+    # ========================================================================
+    force_architecture_from_checkpoint: bool = False  # Skip adaptive architecture builder
+    forced_encoder_channels: List[int] = field(default_factory=list)  # Exact channel sizes from checkpoint
+    forced_encoder_layers_count: int = 0               # Number of encoder layers
+    forced_flattened_size: int = None                  # Flattened size from checkpoint
+    forced_final_h: int = None                         # Final height after encoding
+    forced_final_w: int = None                         # Final width after encoding
+    model_type_override: str = None                    # Override model type detection
+
+    # Additional forced architecture parameters
+    forced_embedder_shape: Tuple[int, int] = None      # Embedder input/output shape
+    forced_unembedder_shape: Tuple[int, int] = None    # Unembedder input/output shape
+    forced_feature_compressor_shape: Tuple[int, int] = None  # Feature compressor shape
+    forced_feature_decompressor_shape: Tuple[int, int] = None  # Feature decompressor shape
+    forced_decoder_channels: List[int] = field(default_factory=list)  # Decoder channels if different
+
+    # Flag to indicate we're in prediction mode
+    prediction_mode: bool = False              # True when loading for prediction
+
     def __post_init__(self):
         """Post-initialization setup"""
-        pass
+        # Ensure forced encoder channels is a list
+        if not isinstance(self.forced_encoder_channels, list):
+            self.forced_encoder_channels = list(self.forced_encoder_channels) if self.forced_encoder_channels else []
+
+        # Ensure forced decoder channels is a list
+        if not isinstance(self.forced_decoder_channels, list):
+            self.forced_decoder_channels = list(self.forced_decoder_channels) if self.forced_decoder_channels else []
+
+        # If forced encoder channels is provided but count is 0, set it
+        if self.forced_encoder_channels and self.forced_encoder_layers_count == 0:
+            self.forced_encoder_layers_count = len(self.forced_encoder_channels)
 
     @property
     def normalization_mode(self) -> str:
         """Return the normalization mode as string"""
         return 'per_image' if self.use_per_image_normalization else 'dataset_wide'
 
+    @property
+    def is_prediction_mode(self) -> bool:
+        """Check if we're in prediction mode"""
+        return self.prediction_mode or self.force_architecture_from_checkpoint
+
+    @property
+    def has_forced_architecture(self) -> bool:
+        """Check if forced architecture is available"""
+        return (self.force_architecture_from_checkpoint and
+                self.forced_encoder_channels and
+                self.forced_encoder_layers_count > 0)
+
     def to_dict(self) -> Dict:
-        return {k: v for k, v in asdict(self).items() if not k.startswith('_')}
+        """Convert config to dictionary for serialization"""
+        result = {}
+        for k, v in asdict(self).items():
+            if not k.startswith('_'):
+                # Handle special types
+                if isinstance(v, torch.Tensor):
+                    result[k] = v.tolist()
+                elif isinstance(v, Path):
+                    result[k] = str(v)
+                else:
+                    result[k] = v
+        return result
 
     @classmethod
     def from_dict(cls, data: Dict) -> 'GlobalConfig':
+        """Create config from dictionary with proper type handling"""
         # Filter out keys that aren't in the dataclass fields
         valid_fields = {f.name for f in cls.__dataclass_fields__.values()}
-        filtered_data = {k: v for k, v in data.items() if k in valid_fields}
+        filtered_data = {}
+
+        for k, v in data.items():
+            if k in valid_fields:
+                # Handle special type conversions
+                if k == 'input_size' and isinstance(v, list):
+                    filtered_data[k] = tuple(v)
+                elif k == 'forced_encoder_channels' and isinstance(v, (list, tuple)):
+                    filtered_data[k] = list(v)
+                elif k == 'forced_decoder_channels' and isinstance(v, (list, tuple)):
+                    filtered_data[k] = list(v)
+                elif k in ['forced_flattened_size', 'forced_final_h', 'forced_final_w'] and v is not None:
+                    filtered_data[k] = int(v)
+                else:
+                    filtered_data[k] = v
+
         return cls(**filtered_data)
+
+    def apply_forced_architecture(self,
+                                  encoder_channels: List[int],
+                                  encoder_layers_count: int,
+                                  flattened_size: int,
+                                  final_h: int,
+                                  final_w: int,
+                                  feature_dims: int,
+                                  compressed_dims: int,
+                                  num_classes: int,
+                                  in_channels: int,
+                                  input_size: Tuple[int, int]) -> None:
+        """
+        Apply forced architecture from checkpoint.
+        This bypasses the adaptive architecture builder.
+        """
+        self.force_architecture_from_checkpoint = True
+        self.forced_encoder_channels = list(encoder_channels)
+        self.forced_encoder_layers_count = encoder_layers_count
+        self.forced_flattened_size = flattened_size
+        self.forced_final_h = final_h
+        self.forced_final_w = final_w
+        self.feature_dims = feature_dims
+        self.compressed_dims = compressed_dims
+        self.num_classes = num_classes
+        self.in_channels = in_channels
+        self.input_size = input_size
+        self.input_size_explicitly_set = True
+        self.force_fixed_compressed_dims = True
+        self.prediction_mode = True
+
+        logger.info(f"Forced architecture applied:")
+        logger.info(f"  Encoder layers: {encoder_layers_count}")
+        logger.info(f"  Encoder channels: {encoder_channels}")
+        logger.info(f"  Flattened size: {flattened_size}")
+        logger.info(f"  Final spatial: {final_h}x{final_w}")
+        logger.info(f"  Feature dims: {feature_dims}")
+        logger.info(f"  Compressed dims: {compressed_dims}")
+        logger.info(f"  Num classes: {num_classes}")
+        logger.info(f"  Input size: {input_size}")
+
+    def reset_forced_architecture(self) -> None:
+        """Reset forced architecture flags for training mode"""
+        self.force_architecture_from_checkpoint = False
+        self.forced_encoder_channels = []
+        self.forced_encoder_layers_count = 0
+        self.forced_flattened_size = None
+        self.forced_final_h = None
+        self.forced_final_w = None
+        self.prediction_mode = False
+        self.force_fixed_compressed_dims = False
+
+        logger.info("Forced architecture reset - reverting to adaptive mode")
+
+    def get_architecture_summary(self) -> Dict[str, Any]:
+        """Get a summary of the current architecture configuration"""
+        summary = {
+            'mode': 'forced' if self.force_architecture_from_checkpoint else 'adaptive',
+            'prediction_mode': self.prediction_mode,
+            'input_size': self.input_size,
+            'in_channels': self.in_channels,
+            'num_classes': self.num_classes,
+            'feature_dims': self.feature_dims,
+            'compressed_dims': self.compressed_dims,
+        }
+
+        if self.force_architecture_from_checkpoint:
+            summary.update({
+                'encoder_layers': self.forced_encoder_layers_count,
+                'encoder_channels': self.forced_encoder_channels,
+                'flattened_size': self.forced_flattened_size,
+                'final_h': self.forced_final_h,
+                'final_w': self.forced_final_w,
+            })
+
+        return summary
+
+    def validate_architecture(self, expected_encoder_channels: List[int],
+                             expected_encoder_layers: int,
+                             expected_flattened_size: int) -> bool:
+        """
+        Validate that the current architecture matches expected values.
+        Returns True if valid, False otherwise.
+        """
+        if not self.force_architecture_from_checkpoint:
+            logger.warning("Not in forced architecture mode - validation skipped")
+            return True
+
+        errors = []
+
+        if self.forced_encoder_channels != expected_encoder_channels:
+            errors.append(f"Encoder channels mismatch: {self.forced_encoder_channels} vs {expected_encoder_channels}")
+
+        if self.forced_encoder_layers_count != expected_encoder_layers:
+            errors.append(f"Encoder layers mismatch: {self.forced_encoder_layers_count} vs {expected_encoder_layers}")
+
+        if self.forced_flattened_size != expected_flattened_size:
+            errors.append(f"Flattened size mismatch: {self.forced_flattened_size} vs {expected_flattened_size}")
+
+        if errors:
+            logger.error("Architecture validation failed:")
+            for error in errors:
+                logger.error(f"  {error}")
+            return False
+
+        logger.info("Architecture validation passed!")
+        return True
+
+    def to_checkpoint_dict(self) -> Dict[str, Any]:
+        """
+        Convert architecture parameters to checkpoint format.
+        Used when saving checkpoints.
+        """
+        return {
+            'force_architecture_from_checkpoint': self.force_architecture_from_checkpoint,
+            'forced_encoder_channels': self.forced_encoder_channels,
+            'forced_encoder_layers_count': self.forced_encoder_layers_count,
+            'forced_flattened_size': self.forced_flattened_size,
+            'forced_final_h': self.forced_final_h,
+            'forced_final_w': self.forced_final_w,
+            'prediction_mode': self.prediction_mode,
+            'feature_dims': self.feature_dims,
+            'compressed_dims': self.compressed_dims,
+            'num_classes': self.num_classes,
+            'in_channels': self.in_channels,
+            'input_size': list(self.input_size) if self.input_size else None,
+        }
+
+    def from_checkpoint_dict(self, data: Dict[str, Any]) -> None:
+        """
+        Load architecture parameters from checkpoint dict.
+        """
+        if 'force_architecture_from_checkpoint' in data:
+            self.force_architecture_from_checkpoint = data['force_architecture_from_checkpoint']
+        if 'forced_encoder_channels' in data and data['forced_encoder_channels']:
+            self.forced_encoder_channels = list(data['forced_encoder_channels'])
+        if 'forced_encoder_layers_count' in data:
+            self.forced_encoder_layers_count = data['forced_encoder_layers_count']
+        if 'forced_flattened_size' in data:
+            self.forced_flattened_size = data['forced_flattened_size']
+        if 'forced_final_h' in data:
+            self.forced_final_h = data['forced_final_h']
+        if 'forced_final_w' in data:
+            self.forced_final_w = data['forced_final_w']
+        if 'prediction_mode' in data:
+            self.prediction_mode = data['prediction_mode']
+        if 'feature_dims' in data:
+            self.feature_dims = data['feature_dims']
+        if 'compressed_dims' in data:
+            self.compressed_dims = data['compressed_dims']
+        if 'num_classes' in data:
+            self.num_classes = data['num_classes']
+        if 'in_channels' in data:
+            self.in_channels = data['in_channels']
+        if 'input_size' in data and data['input_size']:
+            self.input_size = tuple(data['input_size'])
+
+        # Set derived properties
+        if self.forced_encoder_channels and self.forced_encoder_layers_count == 0:
+            self.forced_encoder_layers_count = len(self.forced_encoder_channels)
+
+        if self.force_architecture_from_checkpoint:
+            self.force_fixed_compressed_dims = True
+            self.input_size_explicitly_set = True
+
+        logger.info("Loaded architecture from checkpoint dict")
 
 # =============================================================================
 # DOMAIN CONFIGURATIONS
@@ -3140,57 +3376,218 @@ class CustomImageDataset(Dataset):
         self.full_paths = []
         self.labels = []
 
+        # Define supported formats
+        self._define_supported_formats()
+
+        # Scan directory
         self._scan_directory()
 
-        # CRITICAL FIX: Sort samples deterministically after scanning
-        # Sort by file path to ensure consistent ordering across runs
-        self.samples.sort(key=lambda x: x[0])  # Sort by file path
+        # Sort samples deterministically
+        self.samples.sort(key=lambda x: x[0])
         self.image_files.sort()
         self.full_paths.sort()
         self.filenames.sort()
 
-        # Update labels to match sorted order of samples
+        # Update labels to match sorted order
         self.labels = [label for _, label in self.samples]
 
         self.resize_images = self.config.get('resize_images', False)
 
         logger.info(f"Dataset: {len(self.samples)} images, {len(self.classes)} classes")
+        if len(self.samples) > 0:
+            logger.info(f"Classes: {self.classes}")
+            # Log class distribution
+            dist = self.get_class_distribution()
+            for cls, count in dist.items():
+                logger.info(f"  {cls}: {count} images")
+
+    def _define_supported_formats(self):
+        """Define supported formats including FITS for astronomy"""
+        # Base formats
+        base_formats = ['.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.tif', '.gif', '.webp']
+
+        # Add FITS formats if astronomy domain
+        domain = self.config.get('domain', 'general')
+        use_fits = self.config.get('use_fits', False)
+
+        if domain == 'astronomy' and use_fits:
+            fits_formats = ['.fits', '.fit', '.fits.gz', '.fit.gz']
+            self.supported_formats = tuple(base_formats + fits_formats)
+            logger.info(f"FITS support enabled. Supported formats: {self.supported_formats}")
+        else:
+            self.supported_formats = tuple(base_formats)
+
+        # Store as set for faster lookup
+        self.supported_formats_set = set(self.supported_formats)
 
     def _scan_directory(self):
-        supported_formats = ImageProcessor.SUPPORTED_FORMATS
-        # Add FITS formats if domain is astronomy
-        if hasattr(self.config, 'domain') and self.config.domain == 'astronomy' and getattr(self.config, 'use_fits', False):
-            fits_formats = ('.fits', '.fit', '.fits.gz', '.fit.gz')
-            supported_formats = supported_formats + fits_formats
+        """Scan directory for images with proper FITS support and class subdirectories"""
+        if not self.data_dir.exists():
+            logger.error(f"Directory does not exist: {self.data_dir}")
+            return
 
-        # CRITICAL FIX: Sort directories for deterministic order
-        for class_dir in sorted(self.data_dir.iterdir()):
-            if not class_dir.is_dir():
-                continue
-            class_name = class_dir.name
+        logger.info(f"Scanning directory: {self.data_dir}")
+
+        # CRITICAL FIX: First, check ALL subdirectories for image files
+        class_dirs = []
+        image_files_by_dir = {}
+
+        # Get all subdirectories
+        for item in self.data_dir.iterdir():
+            if item.is_dir():
+                # Count image files in this directory
+                image_count = 0
+                image_files = []
+
+                # Check all supported formats
+                for ext in self.supported_formats_set:
+                    if ext.endswith('.gz'):
+                        # Handle .fits.gz specially
+                        pattern = f'*{ext}'
+                    else:
+                        pattern = f'*{ext}'
+
+                    files = list(item.glob(pattern))
+                    if files:
+                        image_files.extend(files)
+                        image_count += len(files)
+
+                if image_count > 0:
+                    class_dirs.append(item)
+                    image_files_by_dir[item.name] = image_files
+                    logger.info(f"  Found class directory: {item.name} with {image_count} images")
+                else:
+                    # Check if there are any FITS files specifically
+                    fits_files = list(item.glob("*.fits")) + list(item.glob("*.fits.gz"))
+                    if fits_files:
+                        class_dirs.append(item)
+                        image_files_by_dir[item.name] = fits_files
+                        logger.info(f"  Found class directory: {item.name} with {len(fits_files)} FITS images")
+
+        # ALSO check if there are images directly in the root directory
+        root_images = []
+        for ext in self.supported_formats_set:
+            if ext.endswith('.gz'):
+                pattern = f'*{ext}'
+            else:
+                pattern = f'*{ext}'
+            files = list(self.data_dir.glob(pattern))
+            if files:
+                root_images.extend(files)
+
+        # CRITICAL FIX: If we have class directories, use them
+        if class_dirs:
+            logger.info(f"Using class subdirectory structure. Found {len(class_dirs)} classes")
+
+            for class_dir in sorted(class_dirs):
+                class_name = class_dir.name
+
+                # Add class to mapping
+                if class_name not in self.class_to_idx:
+                    idx = len(self.classes)
+                    self.class_to_idx[class_name] = idx
+                    self.idx_to_class[idx] = class_name
+                    self.classes.append(class_name)
+
+                # Get all image files for this class
+                files = image_files_by_dir.get(class_name, [])
+                for img_path in sorted(files):
+                    self._add_sample(img_path, class_name)
+
+            # Also handle root images if any (assign to a special class)
+            if root_images:
+                class_name = "root"
+                if class_name not in self.class_to_idx:
+                    idx = len(self.classes)
+                    self.class_to_idx[class_name] = idx
+                    self.idx_to_class[idx] = class_name
+                    self.classes.append(class_name)
+
+                for img_path in sorted(root_images):
+                    self._add_sample(img_path, class_name)
+
+                logger.info(f"  Found {len(root_images)} images in root directory, assigned to class '{class_name}'")
+
+        # Fallback: flat structure if no class directories found
+        elif root_images:
+            logger.info("Using flat directory structure (no class subdirectories found)")
+            class_name = "unknown"
             if class_name not in self.class_to_idx:
                 idx = len(self.classes)
                 self.class_to_idx[class_name] = idx
                 self.idx_to_class[idx] = class_name
                 self.classes.append(class_name)
 
-            # CRITICAL FIX: Sort image files for deterministic order
-            # Use sorted() with natural sorting for better consistency
-            all_files = list(class_dir.glob('*'))
-            # Sort by path string for deterministic ordering
-            all_files.sort(key=lambda p: str(p))
+            for img_path in sorted(root_images):
+                self._add_sample(img_path, class_name)
 
-            for img_path in all_files:
-                # Check if file is a supported image format
-                is_supported = img_path.suffix.lower() in supported_formats
-                is_fits_gz = img_path.name.lower().endswith('.fits.gz') or img_path.name.lower().endswith('.fit.gz')
+        # If still no files, do a deep search
+        if len(self.samples) == 0:
+            logger.warning("No images found with standard scanning. Performing deep search...")
+            self._deep_search()
 
-                if is_supported or is_fits_gz:
-                    self.samples.append((str(img_path), self.class_to_idx[class_name]))
-                    self.image_files.append(str(img_path))
-                    self.full_paths.append(str(img_path))
-                    self.filenames.append(img_path.name)
-                    self.labels.append(self.class_to_idx[class_name])
+        logger.info(f"Found {len(self.samples)} images in {len(self.classes)} classes")
+
+    def _deep_search(self):
+        """Deep search for FITS files recursively"""
+        logger.info("Performing deep search for all image files...")
+
+        all_files = []
+
+        # Search for all supported formats recursively
+        for ext in self.supported_formats_set:
+            if ext.endswith('.gz'):
+                pattern = f'**/*{ext}'
+            else:
+                pattern = f'**/*{ext}'
+            files = list(self.data_dir.glob(pattern))
+            if files:
+                all_files.extend(files)
+                logger.info(f"  Found {len(files)} files with extension {ext}")
+
+        logger.info(f"Total files found in deep search: {len(all_files)}")
+
+        if not all_files:
+            logger.warning("No image files found in deep search")
+            return
+
+        # Group by parent directory (class)
+        class_map = {}
+        for file_path in all_files:
+            # Get the immediate parent directory name
+            parent_dir = file_path.parent.name
+            if not parent_dir or parent_dir == '.':
+                parent_dir = "root"
+
+            if parent_dir not in class_map:
+                class_map[parent_dir] = []
+            class_map[parent_dir].append(file_path)
+
+        logger.info(f"Found {len(class_map)} class directories in deep search")
+
+        # Add samples
+        for class_name, files in sorted(class_map.items()):
+            if class_name not in self.class_to_idx:
+                idx = len(self.classes)
+                self.class_to_idx[class_name] = idx
+                self.idx_to_class[idx] = class_name
+                self.classes.append(class_name)
+
+            for file_path in sorted(files):
+                self._add_sample(file_path, class_name)
+
+            logger.info(f"  Class '{class_name}': found {len(files)} files")
+
+        logger.info(f"Deep search complete: {len(self.samples)} images in {len(self.classes)} classes")
+
+    def _add_sample(self, img_path: Path, class_name: str):
+        """Add a sample to the dataset"""
+        if img_path.is_file() and img_path.exists():
+            self.samples.append((str(img_path), self.class_to_idx[class_name]))
+            self.image_files.append(str(img_path))
+            self.full_paths.append(str(img_path))
+            self.filenames.append(img_path.name)
+            self.labels.append(self.class_to_idx[class_name])
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -3201,24 +3598,88 @@ class CustomImageDataset(Dataset):
         # Check if FITS file
         is_fits = img_path.lower().endswith(('.fits', '.fit', '.fits.gz', '.fit.gz'))
 
-        if is_fits and hasattr(self.config, 'domain') and self.config.domain == 'astronomy':
-            fits_hdu = getattr(self.config, 'fits_hdu', 0)
-            fits_norm = getattr(self.config, 'fits_normalization', 'zscale')
-            img_array = ImageProcessor.load_fits_image(img_path, hdu=fits_hdu, normalization=fits_norm)
-            if img_array is None:
+        if is_fits:
+            # Try to use astropy for FITS loading
+            try:
+                from astropy.io import fits
+                with fits.open(img_path) as hdul:
+                    fits_hdu = self.config.get('fits_hdu', 0)
+                    if fits_hdu >= len(hdul):
+                        logger.warning(f"HDU {fits_hdu} not found in {img_path}, using HDU 0")
+                        fits_hdu = 0
+                    data = hdul[fits_hdu].data.astype(np.float32)
+
+                    # Handle NaN and infinite values
+                    data = np.nan_to_num(data, nan=0.0, posinf=0.0, neginf=0.0)
+
+                    # Normalize
+                    fits_norm = self.config.get('fits_normalization', 'zscale')
+                    if fits_norm == 'zscale':
+                        data = self._zscale_normalization(data)
+                    elif fits_norm == 'percent':
+                        p1, p99 = np.percentile(data, [1, 99])
+                        data = (data - p1) / (p99 - p1 + 1e-8)
+                    elif fits_norm == 'asinh':
+                        median = np.median(data)
+                        data = np.arcsinh(data - median)
+                        data = (data - data.min()) / (data.max() - data.min() + 1e-8)
+                    else:  # minmax
+                        data = (data - data.min()) / (data.max() - data.min() + 1e-8)
+
+                    # Clip to valid range
+                    data = np.clip(data, 0, 1)
+
+                    # Convert to 3-channel RGB
+                    if len(data.shape) == 2:
+                        data = np.stack([data, data, data], axis=2)
+                    elif len(data.shape) == 3 and data.shape[2] == 1:
+                        data = np.concatenate([data, data, data], axis=2)
+                    elif len(data.shape) == 3 and data.shape[2] > 3:
+                        data = data[:, :, :3]  # Take first 3 channels
+
+                    img = PILImage.fromarray((data * 255).astype(np.uint8))
+
+            except ImportError:
+                logger.error("astropy not available. Please install: pip install astropy")
                 img = PILImage.new('RGB', (256, 256), (0, 0, 0))
-            else:
-                img = PILImage.fromarray((img_array * 255).astype(np.uint8))
+            except Exception as e:
+                logger.error(f"Failed to load FITS image {img_path}: {e}")
+                img = PILImage.new('RGB', (256, 256), (0, 0, 0))
         else:
+            # Regular image
             img = ImageProcessor.load_image(img_path)
             if img is None:
                 img = PILImage.new('RGB', (256, 256), (0, 0, 0))
 
         if img.mode != 'RGB':
             img = img.convert('RGB')
+
         if self.transform:
             img = self.transform(img)
+
         return img, label
+
+    def _zscale_normalization(self, data: np.ndarray, contrast: float = 0.25, samples: int = 1000) -> np.ndarray:
+        """Z-scale normalization for astronomical images"""
+        flat = data.flatten()
+        if len(flat) > samples:
+            # Use fixed random state for reproducibility
+            rng = np.random.RandomState(42)
+            idx = rng.choice(len(flat), samples, replace=False)
+            idx.sort()
+            flat = flat[idx]
+        else:
+            flat = np.sort(flat)
+
+        flat.sort()
+        n = len(flat)
+        center = flat[n // 2]
+        half_range = contrast * (flat[-1] - flat[0])
+        zmin = center - half_range
+        zmax = center + half_range
+
+        normalized = (data - zmin) / (zmax - zmin + 1e-8)
+        return np.clip(normalized, 0, 1)
 
     def get_additional_info(self, idx: int) -> Tuple[int, str, str]:
         """Get additional information for a sample at given index"""
@@ -3229,7 +3690,6 @@ class CustomImageDataset(Dataset):
         dist = defaultdict(int)
         for _, label in self.samples:
             dist[self.idx_to_class[label]] += 1
-        # Return sorted dictionary for deterministic order
         return dict(sorted(dist.items()))
 
     def get_class_weights(self) -> torch.Tensor:
@@ -3531,7 +3991,234 @@ class BaseAutoencoder(nn.Module):
         """
         TRULY DYNAMIC architecture that adapts to ANY dataset.
         Scales based on: number of classes, image size, and dataset complexity.
+
+        CRITICAL: If force_architecture_from_checkpoint is True, this method
+        bypasses all adaptive logic and builds the exact architecture from
+        the forced parameters in the config.
         """
+
+        # ========================================================================
+        # CHECK FOR FORCED ARCHITECTURE FROM CHECKPOINT
+        # ========================================================================
+        if (hasattr(self.config, 'force_architecture_from_checkpoint') and
+            self.config.force_architecture_from_checkpoint and
+            self.config.forced_encoder_channels):
+
+            logger.info("=" * 60)
+            logger.info("🔒 FORCED ARCHITECTURE FROM CHECKPOINT")
+            logger.info("Skipping adaptive architecture builder")
+            logger.info("=" * 60)
+
+            # Extract forced parameters
+            n_layers = self.config.forced_encoder_layers_count
+            encoder_channels = self.config.forced_encoder_channels
+            feature_dims = self.config.feature_dims
+            compressed_dims = self.config.compressed_dims
+            flattened_size = self.config.forced_flattened_size
+            final_h = self.config.forced_final_h
+            final_w = self.config.forced_final_w
+            c = self.in_channels
+
+            # CRITICAL FIX: Get h and w from input_size for logging
+            h, w = self.config.input_size
+
+            # Set architecture attributes
+            self.flattened_size = flattened_size
+            self.final_h = final_h
+            self.final_w = final_w
+            self.encoder_channels = encoder_channels
+            self.feature_dims = feature_dims
+            self.compressed_dims = compressed_dims
+
+            # ========================================================================
+            # BUILD ENCODER FROM FORCED CHANNELS
+            # ========================================================================
+            self.encoder_layers = nn.ModuleList()
+            in_channels = c
+
+            for i, out_channels in enumerate(encoder_channels):
+                # Ensure out_channels is divisible for GroupNorm
+                num_groups = min(16, out_channels)
+                if out_channels % num_groups != 0:
+                    for g in range(min(16, out_channels), 0, -1):
+                        if out_channels % g == 0:
+                            num_groups = g
+                            break
+                    if out_channels % num_groups != 0:
+                        num_groups = 1
+
+                # Build encoder block with two conv layers for better feature extraction
+                encoder_block = nn.Sequential(
+                    nn.Conv2d(in_channels, out_channels, 3, stride=2, padding=1),
+                    nn.GroupNorm(num_groups, out_channels),
+                    nn.LeakyReLU(0.2, inplace=True),
+                    nn.Conv2d(out_channels, out_channels, 3, stride=1, padding=1),
+                    nn.GroupNorm(num_groups, out_channels),
+                    nn.LeakyReLU(0.2, inplace=True)
+                )
+                self.encoder_layers.append(encoder_block)
+                in_channels = out_channels
+
+            # ========================================================================
+            # BUILD EMBEDDER (Encoder → Feature Space)
+            # ========================================================================
+            embed_dim = min(flattened_size, feature_dims)
+            num_groups_embed = min(16, max(1, embed_dim // 16))
+            if embed_dim > 1 and embed_dim % num_groups_embed != 0:
+                for g in range(num_groups_embed, 0, -1):
+                    if embed_dim % g == 0:
+                        num_groups_embed = g
+                        break
+
+            self.embedder = nn.Sequential(
+                nn.Linear(flattened_size, embed_dim),
+                nn.GroupNorm(num_groups_embed, embed_dim) if embed_dim > 1 else nn.Identity(),
+                nn.LeakyReLU(0.2, inplace=True),
+                nn.Dropout(0.3)
+            )
+
+            if embed_dim != feature_dims:
+                self.embedder_projection = nn.Linear(embed_dim, feature_dims)
+                logger.info(f"  Embedder projection: {embed_dim} → {feature_dims}")
+            else:
+                self.embedder_projection = nn.Identity()
+
+            # ========================================================================
+            # BUILD UNEMBEDDER (Feature Space → Encoder Output)
+            # ========================================================================
+            unembed_dim = min(flattened_size, feature_dims)
+            num_groups_unembed = min(16, max(1, unembed_dim // 16))
+            if unembed_dim > 1 and unembed_dim % num_groups_unembed != 0:
+                for g in range(num_groups_unembed, 0, -1):
+                    if unembed_dim % g == 0:
+                        num_groups_unembed = g
+                        break
+
+            self.unembedder = nn.Sequential(
+                nn.Linear(feature_dims, unembed_dim),
+                nn.GroupNorm(num_groups_unembed, unembed_dim) if unembed_dim > 1 else nn.Identity(),
+                nn.LeakyReLU(0.2, inplace=True),
+                nn.Dropout(0.3)
+            )
+
+            if unembed_dim != flattened_size:
+                self.unembedder_projection = nn.Linear(unembed_dim, flattened_size)
+                logger.info(f"  Unembedder projection: {unembed_dim} → {flattened_size}")
+            else:
+                self.unembedder_projection = nn.Identity()
+
+            # ========================================================================
+            # BUILD DECODER FROM FORCED ENCODER CHANNELS
+            # ========================================================================
+            self.decoder_layers = nn.ModuleList()
+            in_channels = encoder_channels[-1]
+
+            for i in range(n_layers - 1, -1, -1):
+                out_channels = c if i == 0 else encoder_channels[i-1]
+                num_groups_dec = min(16, max(1, out_channels // 16))
+                if out_channels % num_groups_dec != 0:
+                    for g in range(num_groups_dec, 0, -1):
+                        if out_channels % g == 0:
+                            num_groups_dec = g
+                            break
+                    if out_channels % num_groups_dec != 0:
+                        num_groups_dec = 1
+
+                if i == 0:
+                    decoder_block = nn.Sequential(
+                        nn.ConvTranspose2d(in_channels, out_channels, 4, stride=2, padding=1),
+                        nn.Tanh()
+                    )
+                else:
+                    decoder_block = nn.Sequential(
+                        nn.ConvTranspose2d(in_channels, out_channels, 4, stride=2, padding=1),
+                        nn.GroupNorm(num_groups_dec, out_channels),
+                        nn.LeakyReLU(0.2, inplace=True),
+                        nn.Conv2d(out_channels, out_channels, 3, stride=1, padding=1),
+                        nn.GroupNorm(num_groups_dec, out_channels),
+                        nn.LeakyReLU(0.2, inplace=True)
+                    )
+                self.decoder_layers.append(decoder_block)
+                in_channels = out_channels
+
+            # ========================================================================
+            # BUILD FEATURE COMPRESSOR
+            # ========================================================================
+            compress_dim = max(32, min(256, feature_dims // 2))
+            compress_dim = max(compress_dim, compressed_dims * 2)
+
+            num_groups_comp = min(16, max(1, compress_dim // 16))
+            if compress_dim > 1 and compress_dim % num_groups_comp != 0:
+                for g in range(num_groups_comp, 0, -1):
+                    if compress_dim % g == 0:
+                        num_groups_comp = g
+                        break
+                if compress_dim % num_groups_comp != 0:
+                    num_groups_comp = 1
+
+            self.feature_compressor = nn.Sequential(
+                nn.Linear(feature_dims, compress_dim),
+                nn.GroupNorm(num_groups_comp, compress_dim) if compress_dim > 1 else nn.Identity(),
+                nn.ReLU(inplace=True),
+                nn.Dropout(0.3),
+                nn.Linear(compress_dim, compressed_dims),
+                nn.Tanh()
+            )
+
+            # ========================================================================
+            # BUILD FEATURE DECOMPRESSOR
+            # ========================================================================
+            decompress_dim = max(32, min(256, feature_dims // 2))
+            decompress_dim = max(decompress_dim, compressed_dims * 2)
+
+            num_groups_decomp = min(16, max(1, decompress_dim // 16))
+            if decompress_dim > 1 and decompress_dim % num_groups_decomp != 0:
+                for g in range(num_groups_decomp, 0, -1):
+                    if decompress_dim % g == 0:
+                        num_groups_decomp = g
+                        break
+                if decompress_dim % num_groups_decomp != 0:
+                    num_groups_decomp = 1
+
+            self.feature_decompressor = nn.Sequential(
+                nn.Linear(compressed_dims, decompress_dim),
+                nn.GroupNorm(num_groups_decomp, decompress_dim) if decompress_dim > 1 else nn.Identity(),
+                nn.ReLU(inplace=True),
+                nn.Dropout(0.3),
+                nn.Linear(decompress_dim, feature_dims),
+                nn.Tanh()
+            )
+
+            # ========================================================================
+            # INITIALIZE PHASE 2 COMPONENTS (will be set later)
+            # ========================================================================
+            self.classifier = None
+            self.cluster_centers = None
+            self.clustering_temperature = None
+
+            # ========================================================================
+            # LOG ARCHITECTURE SUMMARY
+            # ========================================================================
+            total_params = sum(p.numel() for p in self.parameters())
+
+            logger.info("=" * 60)
+            logger.info("📐 FORCED ARCHITECTURE BUILT SUCCESSFULLY")
+            logger.info(f"  Input: {c}x{h}x{w}")
+            logger.info(f"  Encoder layers: {n_layers}")
+            logger.info(f"  Encoder channels: {encoder_channels}")
+            logger.info(f"  Final encoder size: {final_h}x{final_w}")
+            logger.info(f"  Flattened size: {flattened_size}")
+            logger.info(f"  Feature dims: {feature_dims}")
+            logger.info(f"  Compressed dims: {compressed_dims}")
+            logger.info(f"  Total parameters: {total_params:,}")
+            logger.info("=" * 60)
+
+            # Skip normal adaptive architecture building
+            return
+
+        # ========================================================================
+        # ORIGINAL ADAPTIVE ARCHITECTURE BUILDER (for training mode)
+        # ========================================================================
         h, w = self.config.input_size
         c = self.in_channels
         num_classes = self.config.num_classes or 2
@@ -3624,7 +4311,7 @@ class BaseAutoencoder(nn.Module):
             max_channels = min(1024, base_channels * (2 ** (n_layers - 1)))
 
         logger.info("=" * 60)
-        logger.info("Building Truly Adaptive Architecture")
+        logger.info("Building Adaptive Architecture")
         logger.info(f"  Input: {c}x{h}x{w}")
         logger.info(f"  Number of classes: {num_classes}")
         logger.info(f"  Dataset complexity: {complexity:.3f}")
@@ -6299,7 +6986,7 @@ class PredictionManager:
         return img_tensor
 
     def _load_model(self):
-        """Load model from checkpoint with proper architecture matching and auto-detection."""
+        """Load model from checkpoint with EXACT architecture matching."""
         dataset_name_lower = normalize_dataset_name(self.config.dataset_name)
 
         logger.info(f"Looking for model in: {self.model_load_dir}")
@@ -6323,9 +7010,11 @@ class PredictionManager:
                 self.model_load_dir / 'latest.pt',
             ]
 
+        # Also search for any .pt/.pth files
         for pattern in ['*.pt', '*.pth']:
             possible_paths.extend(list(self.model_load_dir.glob(pattern)))
 
+        # Remove duplicates
         seen = set()
         unique_paths = []
         for path in possible_paths:
@@ -6333,6 +7022,7 @@ class PredictionManager:
                 seen.add(path)
                 unique_paths.append(path)
 
+        # Find valid checkpoint
         best_path = None
         for path in unique_paths:
             if path.exists() and path.stat().st_size > 0:
@@ -6354,15 +7044,13 @@ class PredictionManager:
 
         try:
             checkpoint = torch.load(best_path, map_location=self.device, weights_only=False)
-
-            # ================================================================
-            # CRITICAL: Extract COMPLETE architecture from checkpoint
-            # ================================================================
             state_dict = checkpoint['model_state_dict']
 
             # ================================================================
-            # AUTO-DETECT MODEL TYPE FROM STATE DICT
+            # STEP 1: EXTRACT COMPLETE ARCHITECTURE FROM CHECKPOINT
             # ================================================================
+
+            # Detect model type
             has_vae = any('vae_encoder' in k or 'mean_layer' in k or 'logvar_layer' in k for k in state_dict.keys())
             has_contrastive = any('contrastive_head' in k or 'projection_head' in k for k in state_dict.keys())
             has_advanced_hybrid = any('conditional_compress' in k or 'shared_decoder' in k for k in state_dict.keys())
@@ -6371,55 +7059,81 @@ class PredictionManager:
             has_cluster = any('cluster_centers' in k for k in state_dict.keys())
 
             logger.info("=" * 60)
-            logger.info("Auto-detecting model architecture from checkpoint:")
+            logger.info("Extracting COMPLETE architecture from checkpoint:")
             logger.info(f"  VAE components: {'✓' if has_vae else '✗'}")
             logger.info(f"  Contrastive components: {'✓' if has_contrastive else '✗'}")
-            logger.info(f"  Advanced Hybrid components: {'✓' if has_advanced_hybrid else '✗'}")
-            logger.info(f"  Invertible components: {'✓' if has_invertible else '✗'}")
+            logger.info(f"  Advanced Hybrid: {'✓' if has_advanced_hybrid else '✗'}")
+            logger.info(f"  Invertible: {'✓' if has_invertible else '✗'}")
             logger.info(f"  Classifier: {'✓' if has_classifier else '✗'}")
             logger.info(f"  Cluster Centers: {'✓' if has_cluster else '✗'}")
             logger.info("=" * 60)
 
             # ================================================================
-            # UPDATE CONFIG WITH DETECTED MODEL TYPE
+            # STEP 2: EXTRACT ENCODER ARCHITECTURE
             # ================================================================
-            self.config.use_vae = has_vae
-            self.config.use_contrastive_learning = has_contrastive
-            self.config.use_advanced_hybrid = has_advanced_hybrid
-            self.config.use_invertible = has_invertible
 
-            # Extract encoder layers count from state dict
-            encoder_layers = 0
             encoder_channels = []
+            encoder_layers_count = 0
+            flattened_size = None
+            final_h = None
+            final_w = None
+            feature_dims = None
+            compressed_dims = None
+            num_classes = None
+            in_channels = 3
+            input_size = (32, 32)
 
-            # Count encoder layers by looking for encoder_layers.X.0.weight
+            # CRITICAL FIX: First try to get num_classes from checkpoint directly
+            if 'num_classes' in checkpoint:
+                num_classes = checkpoint['num_classes']
+                logger.info(f"  Extracted num_classes from checkpoint: {num_classes}")
+            elif 'model_architecture' in checkpoint and 'num_classes' in checkpoint['model_architecture']:
+                num_classes = checkpoint['model_architecture']['num_classes']
+                logger.info(f"  Extracted num_classes from model_architecture: {num_classes}")
+
+            # Count encoder layers and extract channels
             i = 0
             while True:
-                key = f'encoder_layers.{i}.0.weight'
-                if key in state_dict:
-                    shape = state_dict[key].shape
-                    encoder_channels.append(shape[0])  # output channels
-                    encoder_layers += 1
-                    i += 1
-                else:
+                # Try different key patterns
+                patterns = [
+                    f'encoder_layers.{i}.0.weight',
+                    f'encoder_layers.{i}.weight',
+                    f'encoder_layers.{i}.conv1.weight',
+                ]
+                found = False
+                for pattern in patterns:
+                    if pattern in state_dict:
+                        shape = state_dict[pattern].shape
+                        # shape is [out_channels, in_channels, k, k]
+                        if len(shape) >= 4:
+                            out_channels = shape[0]
+                            encoder_channels.append(out_channels)
+                            encoder_layers_count += 1
+                            found = True
+                            break
+                        elif len(shape) >= 2:
+                            # For linear layers (less common in encoder)
+                            out_channels = shape[0]
+                            encoder_channels.append(out_channels)
+                            encoder_layers_count += 1
+                            found = True
+                            break
+                if not found:
                     break
+                i += 1
 
-            # If no encoder_layers found, try alternative pattern
-            if encoder_layers == 0:
-                i = 0
-                while True:
-                    key = f'encoder_layers.{i}.weight'
-                    if key in state_dict:
-                        shape = state_dict[key].shape
-                        encoder_channels.append(shape[0])
-                        encoder_layers += 1
-                        i += 1
-                    else:
-                        break
+            # If no encoder layers found, try to extract from model_architecture in checkpoint
+            if encoder_layers_count == 0 and 'model_architecture' in checkpoint:
+                arch = checkpoint['model_architecture']
+                if 'encoder_channels' in arch:
+                    encoder_channels = arch['encoder_channels']
+                    encoder_layers_count = len(encoder_channels)
+                    logger.info(f"Extracted encoder channels from model_architecture: {encoder_channels}")
+                if 'encoder_layers' in arch:
+                    encoder_layers_count = arch['encoder_layers']
 
             # Extract in_channels from first encoder layer
-            in_channels = 3
-            if encoder_layers > 0:
+            if encoder_layers_count > 0:
                 key = f'encoder_layers.0.0.weight'
                 if key in state_dict:
                     in_channels = state_dict[key].shape[1]
@@ -6428,46 +7142,75 @@ class PredictionManager:
                     if key in state_dict:
                         in_channels = state_dict[key].shape[1]
 
-            # Extract feature_dims from embedder
-            feature_dims = None
+            # Extract input_size from checkpoint
+            if 'input_size' in checkpoint:
+                input_size = tuple(checkpoint['input_size']) if isinstance(checkpoint['input_size'], list) else checkpoint['input_size']
+            elif 'model_architecture' in checkpoint and 'input_size' in checkpoint['model_architecture']:
+                input_size = tuple(checkpoint['model_architecture']['input_size'])
+
+            # Extract flattened_size
+            if 'flattened_size' in checkpoint:
+                flattened_size = checkpoint['flattened_size']
+            elif 'model_architecture' in checkpoint and 'flattened_size' in checkpoint['model_architecture']:
+                flattened_size = checkpoint['model_architecture']['flattened_size']
+
+            # If flattened_size not in checkpoint, compute it
+            if flattened_size is None and encoder_channels and input_size:
+                h, w = input_size
+                for _ in range(encoder_layers_count):
+                    h = (h + 1) // 2
+                    w = (w + 1) // 2
+                final_h, final_w = max(1, h), max(1, w)
+                flattened_size = encoder_channels[-1] * final_h * final_w
+
+            # Extract feature_dims
             embedder_keys = [k for k in state_dict.keys() if 'embedder.0.weight' in k]
             if embedder_keys:
                 feature_dims = state_dict[embedder_keys[0]].shape[0]
+            elif 'feature_dims' in checkpoint:
+                feature_dims = checkpoint['feature_dims']
+            elif 'model_architecture' in checkpoint and 'feature_dims' in checkpoint['model_architecture']:
+                feature_dims = checkpoint['model_architecture']['feature_dims']
 
-            # Extract compressed_dims from feature_compressor
-            compressed_dims = None
+            # Extract compressed_dims
             compressor_keys = [k for k in state_dict.keys() if 'feature_compressor.4.weight' in k]
             if compressor_keys:
                 compressed_dims = state_dict[compressor_keys[0]].shape[0]
             elif has_vae:
-                # For VAE, compressed_dims is the latent dimension
                 mean_keys = [k for k in state_dict.keys() if 'mean_layer.weight' in k]
                 if mean_keys:
                     compressed_dims = state_dict[mean_keys[0]].shape[0]
+            elif 'compressed_dims' in checkpoint:
+                compressed_dims = checkpoint['compressed_dims']
+            elif 'model_architecture' in checkpoint and 'compressed_dims' in checkpoint['model_architecture']:
+                compressed_dims = checkpoint['model_architecture']['compressed_dims']
 
-            # Extract flattened_size from embedder input
-            flattened_size = None
-            if embedder_keys:
-                flattened_size = state_dict[embedder_keys[0]].shape[1]
+            # CRITICAL FIX: If num_classes is still None, extract from classifier
+            if num_classes is None:
+                classifier_keys = [k for k in state_dict.keys() if 'classifier.0.weight' in k]
+                if classifier_keys:
+                    num_classes = state_dict[classifier_keys[0]].shape[0]
+                    logger.info(f"  Extracted num_classes from classifier: {num_classes}")
+                elif 'model_architecture' in checkpoint and 'num_classes' in checkpoint['model_architecture']:
+                    num_classes = checkpoint['model_architecture']['num_classes']
+                    logger.info(f"  Extracted num_classes from model_architecture: {num_classes}")
+                else:
+                    # Fallback: use config num_classes but warn
+                    num_classes = self.config.num_classes or 100
+                    logger.warning(f"  Using config num_classes: {num_classes} (not found in checkpoint)")
 
-            # Extract num_classes from classifier
-            num_classes = None
-            classifier_keys = [k for k in state_dict.keys() if 'classifier.0.weight' in k]
-            if classifier_keys:
-                num_classes = state_dict[classifier_keys[0]].shape[0]
-            elif 'num_classes' in checkpoint:
-                num_classes = checkpoint['num_classes']
+            # Compute final_h and final_w if not set
+            if final_h is None or final_w is None:
+                h, w = input_size
+                for _ in range(encoder_layers_count):
+                    h = (h + 1) // 2
+                    w = (w + 1) // 2
+                final_h, final_w = max(1, h), max(1, w)
 
-            # Extract input size
-            input_size = (32, 32)
-            if 'input_size' in checkpoint:
-                input_size = tuple(checkpoint['input_size']) if isinstance(checkpoint['input_size'], list) else checkpoint['input_size']
-            elif 'input_size' in checkpoint.get('model_architecture', {}):
-                input_size = tuple(checkpoint['model_architecture']['input_size'])
-
+            # Log extracted architecture
             logger.info("=" * 60)
-            logger.info("Extracted COMPLETE architecture from checkpoint:")
-            logger.info(f"  Encoder layers: {encoder_layers}")
+            logger.info("EXTRACTED ARCHITECTURE FROM CHECKPOINT:")
+            logger.info(f"  Encoder layers: {encoder_layers_count}")
             logger.info(f"  Encoder channels: {encoder_channels}")
             logger.info(f"  In channels: {in_channels}")
             logger.info(f"  Flattened size: {flattened_size}")
@@ -6475,163 +7218,111 @@ class PredictionManager:
             logger.info(f"  Compressed dims: {compressed_dims}")
             logger.info(f"  Num classes: {num_classes}")
             logger.info(f"  Input size: {input_size}")
-            logger.info("=" * 60)
-
-            # ================================================================
-            # UPDATE CONFIG WITH CHECKPOINT ARCHITECTURE
-            # ================================================================
-            if feature_dims is not None:
-                self.config.feature_dims = feature_dims
-            if compressed_dims is not None:
-                self.config.compressed_dims = compressed_dims
-            if num_classes is not None:
-                self.config.num_classes = num_classes
-            if input_size is not None:
-                self.config.input_size = input_size
-            if in_channels is not None:
-                self.config.in_channels = in_channels
-
-            # Store encoder architecture for the model to use
-            self.config.encoder_layers = encoder_layers
-            self.config.encoder_channels = encoder_channels
-            self.config.flattened_size = flattened_size
-            self.config.input_size_explicitly_set = True
-            self.config.force_fixed_compressed_dims = True
-
-            logger.info("=" * 60)
-            logger.info("Building model with COMPLETE restored architecture:")
-            logger.info(f"  Input size: {self.config.input_size}")
-            logger.info(f"  Encoder layers: {encoder_layers}")
-            logger.info(f"  Encoder channels: {encoder_channels}")
-            logger.info(f"  Feature dims: {self.config.feature_dims}")
-            logger.info(f"  Compressed dims: {self.config.compressed_dims}")
-            logger.info(f"  Num classes: {self.config.num_classes}")
             logger.info(f"  Model type: {'VAE+Contrastive' if has_vae and has_contrastive else 'VAE' if has_vae else 'Contrastive' if has_contrastive else 'Base'}")
             logger.info("=" * 60)
 
             # ================================================================
-            # BUILD MODEL WITH EXACT ARCHITECTURE USING ModelFactory
+            # STEP 3: UPDATE CONFIG WITH FORCED ARCHITECTURE
             # ================================================================
-            # Use ModelFactory (defined in this file) to create the correct model type
-            self.model = ModelFactory.create_model(self.config)
+
+            # CRITICAL FIX: Override config num_classes with checkpoint value
+            if num_classes is not None:
+                self.config.num_classes = num_classes
+                logger.info(f"  Set config.num_classes to {num_classes} from checkpoint")
+
+            # CRITICAL: Set flags to bypass adaptive architecture builder
+            self.config.force_architecture_from_checkpoint = True
+            self.config.forced_encoder_channels = encoder_channels
+            self.config.forced_encoder_layers_count = encoder_layers_count
+            self.config.forced_flattened_size = flattened_size
+            self.config.forced_final_h = final_h
+            self.config.forced_final_w = final_w
+            self.config.input_size = input_size
+            self.config.in_channels = in_channels
+            self.config.feature_dims = feature_dims
+            self.config.compressed_dims = compressed_dims
+            self.config.input_size_explicitly_set = True
+            self.config.force_fixed_compressed_dims = True
+
+            # Update model type flags
+            self.config.use_vae = has_vae
+            self.config.use_contrastive_learning = has_contrastive
+            self.config.use_advanced_hybrid = has_advanced_hybrid
+            self.config.use_invertible = has_invertible
 
             # ================================================================
-            # LOAD THE COMPLETE MODEL STATE DICT
+            # STEP 4: CREATE MODEL WITH FORCED ARCHITECTURE
             # ================================================================
-            # Try strict loading first
+
+            # Use ModelFactory with forced architecture flag
+            self.model = ModelFactory.create_model(self.config)
+            self.model = self.model.to(self.device)
+
+            # ================================================================
+            # STEP 5: LOAD STATE DICT WITH STRICT MATCHING
+            # ================================================================
+
             try:
+                # First attempt: strict loading
                 self.model.load_state_dict(checkpoint['model_state_dict'], strict=True)
-                logger.info("Model loaded successfully with strict matching")
+                logger.info("✓ Model loaded successfully with strict matching")
             except RuntimeError as e:
-                logger.warning(f"Strict loading failed: {e}")
+                logger.warning(f"Strict loading failed: {str(e)[:200]}...")
                 logger.info("Attempting non-strict loading...")
 
-                # For VAE+Contrastive combined model, we need to handle the loading carefully
-                if has_vae and has_contrastive:
-                    # Check if we have VAEWithContrastive loaded
-                    if isinstance(self.model, VAEWithContrastive):
-                        logger.info("Using VAEWithContrastive model - loading weights carefully")
+                # Second attempt: non-strict loading
+                missing_keys, unexpected_keys = self.model.load_state_dict(
+                    checkpoint['model_state_dict'], strict=False
+                )
 
-                        # Load with strict=False but check for critical mismatches
-                        missing_keys, unexpected_keys = self.model.load_state_dict(
-                            checkpoint['model_state_dict'], strict=False
-                        )
-
-                        # Log what's missing/unexpected
-                        if missing_keys:
-                            # Filter out optional components
-                            optional_missing = [k for k in missing_keys if 'cluster_centers' in k or 'selected_feature' in k]
-                            critical_missing = [k for k in missing_keys if k not in optional_missing]
-
-                            if critical_missing:
-                                logger.warning(f"Critical missing keys: {critical_missing[:5]}...")
-                                # Try to handle specific cases
-                                for key in critical_missing:
-                                    if 'classifier' in key:
-                                        logger.warning(f"Classifier keys missing - will be reinitialized")
-                                    elif 'contrastive_head' in key:
-                                        logger.warning(f"Contrastive head keys missing - will be reinitialized")
-                        else:
-                            logger.info("All model keys loaded successfully")
-
-                        if unexpected_keys:
-                            logger.debug(f"Unexpected keys (ignored): {unexpected_keys[:3]}...")
-                    else:
-                        # Fallback to standard loading
-                        missing_keys, unexpected_keys = self.model.load_state_dict(
-                            checkpoint['model_state_dict'], strict=False
-                        )
-                else:
-                    # Standard loading for non-combined models
-                    missing_keys, unexpected_keys = self.model.load_state_dict(
-                        checkpoint['model_state_dict'], strict=False
-                    )
-
+                # Check for critical missing keys
                 if missing_keys:
-                    critical_missing = [k for k in missing_keys if 'classifier' not in k and 'cluster_centers' not in k and 'selected_feature' not in k and 'contrastive_head' not in k and 'projection_head' not in k]
+                    # Filter out optional components
+                    optional_prefixes = ('cluster_centers', 'clustering_temperature',
+                                       'selected_feature', 'contrastive_head', 'projection_head')
+                    critical_missing = [k for k in missing_keys if not any(k.startswith(p) for p in optional_prefixes)]
+
                     if critical_missing:
                         logger.warning(f"Critical missing keys: {critical_missing[:5]}...")
+                        # Try to handle common patterns
+                        for key in critical_missing:
+                            if 'classifier' in key and has_classifier:
+                                logger.warning(f"  Missing classifier key: {key} - may need reinitialization")
+                            elif 'vae_encoder' in key and has_vae:
+                                logger.warning(f"  Missing VAE key: {key} - may need reinitialization")
                     else:
-                        logger.info(f"Model loaded (missing only optional components)")
+                        logger.info(f"Missing only optional components: {missing_keys[:3] if missing_keys else 'None'}")
 
                 if unexpected_keys:
-                    logger.debug(f"Unexpected keys (ignored): {unexpected_keys[:3]}...")
+                    logger.debug(f"Unexpected keys (ignored): {unexpected_keys[:3] if unexpected_keys else 'None'}")
+
+                logger.info("✓ Model loaded with non-strict matching")
 
             # ================================================================
-            # HANDLE CLASSIFIER (if present in checkpoint but not in model)
+            # STEP 6: LOAD ADDITIONAL COMPONENTS
             # ================================================================
-            if 'classifier_state_dict' in checkpoint and checkpoint['classifier_state_dict']:
+
+            # Load classifier if available and not already loaded
+            if has_classifier and 'classifier_state_dict' in checkpoint:
                 if hasattr(self.model, 'classifier') and self.model.classifier is not None:
                     try:
                         self.model.classifier.load_state_dict(checkpoint['classifier_state_dict'], strict=False)
-                        logger.info("Loaded classifier state dict")
+                        logger.info("✓ Loaded classifier state dict")
                     except Exception as e:
                         logger.warning(f"Could not load classifier: {e}")
-                        # Try to rebuild classifier
-                        try:
-                            new_classifier = self._rebuild_classifier_from_checkpoint(
-                                checkpoint['classifier_state_dict']
-                            )
-                            if new_classifier:
-                                self.model.classifier = new_classifier.to(self.device)
-                                logger.info("Rebuilt classifier from checkpoint")
-                        except Exception as e2:
-                            logger.warning(f"Failed to rebuild classifier: {e2}")
-                elif has_vae and has_contrastive:
-                    # For VAEWithContrastive, classifier is built in __init__
-                    logger.info("Classifier is already built in VAEWithContrastive model")
 
-            # ================================================================
-            # HANDLE CONTRASTIVE HEAD (if present in checkpoint)
-            # ================================================================
-            if has_contrastive and hasattr(self.model, 'contrastive_head'):
-                # Check if contrastive_head weights were loaded
-                contrastive_keys = [k for k in state_dict.keys() if 'contrastive_head' in k]
-                if contrastive_keys:
-                    logger.info(f"Contrastive head present in checkpoint ({len(contrastive_keys)} keys)")
-                else:
-                    logger.info("Contrastive head not found in checkpoint - will use initialized weights")
-
-            # ================================================================
-            # HANDLE CLUSTER CENTERS
-            # ================================================================
-            if 'cluster_centers' in checkpoint and checkpoint['cluster_centers'] is not None:
+            # Load cluster centers if available
+            if has_cluster and 'cluster_centers' in checkpoint:
                 if hasattr(self.model, 'cluster_centers') and self.model.cluster_centers is not None:
                     centers = checkpoint['cluster_centers']
                     if isinstance(centers, torch.Tensor):
                         if centers.shape == self.model.cluster_centers.shape:
                             self.model.cluster_centers.data = centers.to(self.device)
-                            logger.info(f"Loaded {len(self.model.cluster_centers)} cluster centers")
+                            logger.info(f"✓ Loaded {len(self.model.cluster_centers)} cluster centers")
                         else:
                             logger.warning(f"Cluster centers shape mismatch: checkpoint {centers.shape} vs model {self.model.cluster_centers.shape}")
-                    else:
-                        logger.warning("Cluster centers in checkpoint is not a tensor")
-                else:
-                    logger.info("Model does not have cluster_centers attribute - skipping")
 
-            # ================================================================
-            # LOAD FEATURE SELECTION
-            # ================================================================
+            # Load feature selection if available
             if 'selected_feature_indices' in checkpoint and checkpoint['selected_feature_indices'] is not None:
                 indices = checkpoint['selected_feature_indices']
                 if isinstance(indices, torch.Tensor):
@@ -6639,11 +7330,12 @@ class PredictionManager:
                 else:
                     self.model._selected_feature_indices = torch.tensor(indices, device=self.device)
                 self.model._is_feature_selection_frozen = True
-                logger.info(f"Loaded feature selection with {len(indices)} features")
+                logger.info(f"✓ Loaded feature selection with {len(indices)} features")
 
             # ================================================================
-            # LOAD NORMALIZATION STATISTICS
+            # STEP 7: LOAD NORMALIZATION STATISTICS
             # ================================================================
+
             if 'dataset_statistics' in checkpoint and checkpoint['dataset_statistics']:
                 stats_dict = checkpoint['dataset_statistics']
                 if 'mean' in stats_dict and stats_dict['mean'] is not None:
@@ -6652,8 +7344,9 @@ class PredictionManager:
                     self.norm_std = torch.tensor(stats_dict['std'], dtype=torch.float32)
                 self.norm_is_fitted = True
                 self.norm_n_samples = stats_dict.get('n_samples_used', stats_dict.get('n_samples', 0))
-                logger.info("Loaded dataset statistics from checkpoint")
+                logger.info("✓ Loaded dataset statistics from checkpoint")
 
+                # Create statistics wrapper for the model
                 class StatisticsWrapper:
                     def __init__(self, mean, std, n_samples):
                         self.mean = mean
@@ -6667,7 +7360,9 @@ class PredictionManager:
                         return (x - mean) / (std + 1e-8)
 
                 stats_wrapper = StatisticsWrapper(self.norm_mean, self.norm_std, self.norm_n_samples)
-                self.model.set_dataset_statistics(stats_wrapper)
+                if hasattr(self.model, 'set_dataset_statistics'):
+                    self.model.set_dataset_statistics(stats_wrapper)
+
                 logger.info("=" * 60)
                 logger.info("TRAINING STATISTICS ATTACHED TO MODEL:")
                 logger.info(f"  Mean: {self.norm_mean.tolist()}")
@@ -6676,38 +7371,26 @@ class PredictionManager:
                 logger.info("=" * 60)
 
             # ================================================================
-            # HANDLE VAE-SPECIFIC COMPONENTS
+            # STEP 8: SET MODEL TO EVALUATION MODE
             # ================================================================
-            if has_vae and hasattr(self.model, 'vae_encoder'):
-                # VAE-specific loading - check if KL annealing should be enabled
-                if 'vae_config' in checkpoint:
-                    vae_config = checkpoint['vae_config']
-                    if 'use_kl_annealing' in vae_config:
-                        self.model.use_kl_annealing = vae_config['use_kl_annealing']
-                        logger.info(f"Set KL annealing to: {self.model.use_kl_annealing}")
-                    if 'vae_beta' in vae_config:
-                        self.model.beta = vae_config['vae_beta']
-                        logger.info(f"Set VAE beta to: {self.model.beta}")
 
-                # Set model to inference mode (deterministic)
-                if hasattr(self.model, 'set_deterministic_mode'):
-                    self.model.set_deterministic_mode(enabled=True, single_image=True)
-
-            # ================================================================
-            # SET MODEL STATE
-            # ================================================================
+            # Set training phase
             checkpoint_phase = checkpoint.get('phase', 2)
             if hasattr(self.model, 'set_training_phase'):
                 self.model.set_training_phase(checkpoint_phase)
+
+            # Set to evaluation mode
             self.model.eval()
             self.model.to(self.device)
 
+            # Enable deterministic mode if available
             if hasattr(self.model, 'set_deterministic_mode'):
                 self.model.set_deterministic_mode(enabled=True, single_image=True)
 
             # ================================================================
-            # LOG FINAL STATUS
+            # STEP 9: LOG FINAL STATUS
             # ================================================================
+
             logger.info("=" * 60)
             logger.info("MODEL LOADED SUCCESSFULLY")
             logger.info(f"  Checkpoint: {best_path}")
@@ -6717,12 +7400,6 @@ class PredictionManager:
             logger.info(f"  Compressed dims: {self.config.compressed_dims}")
             logger.info(f"  Classes: {self.config.num_classes}")
             logger.info(f"  Model type: {'VAE+Contrastive' if has_vae and has_contrastive else 'VAE' if has_vae else 'Contrastive' if has_contrastive else 'Base'}")
-            if hasattr(self.model, 'encoder_channels'):
-                logger.info(f"  Encoder channels: {self.model.encoder_channels}")
-            if has_vae and hasattr(self.model, 'latent_dim'):
-                logger.info(f"  Latent dimension: {self.model.latent_dim}")
-            if has_contrastive and hasattr(self.model, 'contrastive_head'):
-                logger.info(f"  Contrastive head: present")
             logger.info("=" * 60)
 
         except Exception as e:
@@ -6836,6 +7513,9 @@ class PredictionManager:
         if self.model is None:
             logger.error("No model loaded. Cannot perform prediction.")
             return None
+
+        # Verify model architecture before prediction
+        self.verify_model_architecture()
 
         logger.info("=" * 70)
         logger.info("PREDICTION")
@@ -7046,6 +7726,9 @@ class PredictionManager:
         dataset_name_lower = normalize_dataset_name(self.config.dataset_name)
         data_dir = Path(output_csv).parent
 
+        # Get class names from config or infer from labels
+        class_names = self.config.class_names if self.config.class_names else sorted(set(class_labels))
+
         # Get ONLY feature columns and target - NO prediction, confidence, uncertainty
         actual_feature_count = self.config.compressed_dims
         feature_columns = [f'feature_{i}' for i in range(actual_feature_count)]
@@ -7232,6 +7915,52 @@ class PredictionManager:
             arch_info['flattened_size'] = arch_info['embedder_in']
 
         return arch_info
+
+    def verify_model_architecture(self) -> Dict:
+        """Verify that the loaded model matches the checkpoint architecture."""
+        if self.model is None:
+            return {'status': 'error', 'message': 'No model loaded'}
+
+        # Get model architecture
+        model_info = {
+            'encoder_layers': len(self.model.encoder_layers) if hasattr(self.model, 'encoder_layers') else 0,
+            'encoder_channels': self.model.encoder_channels if hasattr(self.model, 'encoder_channels') else [],
+            'feature_dims': self.config.feature_dims,
+            'compressed_dims': self.config.compressed_dims,
+            'input_size': self.config.input_size,
+            'in_channels': self.config.in_channels,
+            'num_classes': self.config.num_classes,
+            'device': str(self.device),
+            'training_mode': not self.model.training,
+        }
+
+        # Check if model has expected components
+        has_classifier = hasattr(self.model, 'classifier') and self.model.classifier is not None
+        has_cluster = hasattr(self.model, 'cluster_centers') and self.model.cluster_centers is not None
+        has_vae = hasattr(self.model, 'vae_encoder') if hasattr(self.model, 'vae_encoder') else False
+        has_contrastive = hasattr(self.model, 'contrastive_head') if hasattr(self.model, 'contrastive_head') else False
+
+        model_info.update({
+            'has_classifier': has_classifier,
+            'has_cluster_centers': has_cluster,
+            'has_vae': has_vae,
+            'has_contrastive': has_contrastive,
+        })
+
+        # Verify dimensions match
+        if hasattr(self.model, 'encoder_channels') and self.model.encoder_channels:
+            model_info['encoder_channels_mismatch'] = (
+                self.model.encoder_channels != self.config.forced_encoder_channels
+                if hasattr(self.config, 'forced_encoder_channels') else False
+            )
+
+        logger.info("=" * 60)
+        logger.info("MODEL ARCHITECTURE VERIFICATION")
+        for key, value in model_info.items():
+            logger.info(f"  {key}: {value}")
+        logger.info("=" * 60)
+
+        return model_info
 
 # =============================================================================
 # COMPLETE TRAINER - All original functionality preserved
@@ -15686,6 +16415,92 @@ class ModelFactory:
         """Create model with domain-specific enhancements and advanced architecture"""
 
         # ================================================================
+        # CHECK FOR FORCED ARCHITECTURE MODE (PREDICTION)
+        # ================================================================
+        if (hasattr(config, 'force_architecture_from_checkpoint') and
+            config.force_architecture_from_checkpoint and
+            config.forced_encoder_channels):
+
+            logger.info("=" * 60)
+            logger.info("🔒 FORCED ARCHITECTURE MODE ENABLED")
+            logger.info("Building model from checkpoint architecture")
+            logger.info(f"  Encoder layers: {config.forced_encoder_layers_count}")
+            logger.info(f"  Encoder channels: {config.forced_encoder_channels}")
+            logger.info(f"  Flattened size: {config.forced_flattened_size}")
+            logger.info(f"  Feature dims: {config.feature_dims}")
+            logger.info(f"  Compressed dims: {config.compressed_dims}")
+            logger.info(f"  Model type: {'VAE+Contrastive' if config.use_vae and config.use_contrastive_learning else 'VAE' if config.use_vae else 'Contrastive' if config.use_contrastive_learning else 'Base'}")
+            logger.info("=" * 60)
+
+            # Determine model type from config flags (already set from checkpoint detection)
+            use_vae = getattr(config, 'use_vae', False)
+            use_contrastive = getattr(config, 'use_contrastive_learning', False)
+            use_advanced = getattr(config, 'use_advanced_hybrid', False)
+            use_invertible = getattr(config, 'use_invertible', False)
+            use_hybrid = getattr(config, 'use_hybrid_autoencoder', False)
+            use_enhanced = getattr(config, 'use_enhanced_autoencoder', True)
+
+            # ================================================================
+            # FORCED VAE + CONTRASTIVE COMBINATION
+            # ================================================================
+            if use_vae and use_contrastive:
+                logger.info("Creating VAE + Contrastive (Forced Architecture)")
+                return VAEWithContrastive(config)
+
+            # ================================================================
+            # FORCED VAE
+            # ================================================================
+            elif use_vae:
+                logger.info("Creating VAE (Forced Architecture)")
+                return BayesianVAE(config)
+
+            # ================================================================
+            # FORCED CONTRASTIVE
+            # ================================================================
+            elif use_contrastive:
+                logger.info("Creating Contrastive Autoencoder (Forced Architecture)")
+                return ContrastiveAutoencoderWithProjection(config)
+
+            # ================================================================
+            # FORCED ADVANCED HYBRID
+            # ================================================================
+            elif use_advanced:
+                logger.info("Creating Advanced Hybrid Autoencoder (Forced Architecture)")
+                return AdvancedHybridAutoencoder(config)
+
+            # ================================================================
+            # FORCED INVERTIBLE
+            # ================================================================
+            elif use_invertible:
+                logger.info("Creating Invertible Autoencoder (Forced Architecture)")
+                return InvertibleAutoencoder(config)
+
+            # ================================================================
+            # FORCED HYBRID
+            # ================================================================
+            elif use_hybrid:
+                logger.info("Creating Hybrid Autoencoder (Forced Architecture)")
+                return HybridAutoencoder(config)
+
+            # ================================================================
+            # FORCED ENHANCED BASE
+            # ================================================================
+            elif use_enhanced:
+                logger.info("Creating Enhanced Base Autoencoder (Forced Architecture)")
+                return EnhancedBaseAutoencoder(config)
+
+            # ================================================================
+            # FORCED BASE AUTOENCODER (Fallback)
+            # ================================================================
+            else:
+                logger.info("Creating Base Autoencoder (Forced Architecture)")
+                return BaseAutoencoder(config)
+
+        # ================================================================
+        # ORIGINAL ADAPTIVE MODEL CREATION (for training mode)
+        # ================================================================
+
+        # ================================================================
         # CHECK FOR VAE + CONTRASTIVE COMBINATION FIRST (Highest priority)
         # ================================================================
         use_vae = getattr(config, 'use_vae', False)
@@ -16058,6 +16873,7 @@ class ModelFactory:
 
         # Create the appropriate model
         return ModelFactory.create_model(config)
+
 
 
 # =============================================================================
